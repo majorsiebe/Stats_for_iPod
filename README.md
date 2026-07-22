@@ -1,4 +1,4 @@
-# iPod Wrapped
+# Spun
 
 *Spotify Wrapped, but it lives on your iPod.*
 
@@ -155,7 +155,7 @@ This ships as a full (patched) Rockbox build for the iPod Classic, not a standal
 1. Download the zip from the [latest release](https://github.com/majorsiebe/Stats_for_iPod/releases/latest).
 2. Extract it to the root of your iPod (it merges into the existing `.rockbox` folder).
 3. Safely eject and reboot the iPod.
-4. You'll find **Wrapped** in the main menu.
+4. You'll find **Spun** in the main menu.
 
 ## Building from source
 
