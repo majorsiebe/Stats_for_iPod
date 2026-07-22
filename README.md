@@ -121,7 +121,7 @@ Letter key: **R**oamer, **D**evotee, **E**xplorer, **F** = repeater, **S**ampler
 
 ![achievements card](screenshots/card_15.png)
 
-This is one I believe Spotify does **not** have! My inspiration comes from the popular browser game Cookie Clicker, known for its impossible achievements. As of writing this (July 22nd, 2026) there are **346 to collect**, ranging from very simple (1 minute listened) to downright impossible. I won't spoil them here, but a list will be available if you are curious.
+This is one I believe Spotify does **not** have! My inspiration comes from the popular browser game Cookie Clicker, known for its impossible achievements. As of writing this (July 22nd, 2026) there are **346 to collect**, ranging from very simple (1 minute listened) to downright impossible. I won't spoil them here, but the [complete list](ACHIEVEMENTS.md) is available if you are curious.
 
 > **NOTE:** The iPod will know if you tamper with it, and it WILL call you out. You have been warned.
 
