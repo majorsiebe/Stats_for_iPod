@@ -3,13 +3,13 @@
 > **SPOILER WARNING:** this is every badge, including all the secret
 > ones. If you'd rather discover them on the iPod, close this file now.
 
-**346 achievements total, 73 of them secret.** Earned badges show gold
+**345 achievements total, 72 of them secret.** Earned badges show gold
 on the iPod. Green means cheated — the iPod signs its own listening
 history and knows when a PC edited it. It will call you out. Don't
 even try.
 
 <details>
-<summary><b>Show all 346 achievements</b></summary>
+<summary><b>Show all 345 achievements</b></summary>
 
 ### Listening Time
 
@@ -489,37 +489,31 @@ even try.
 | 332 | **Identity Crisis** | collect 12 listening types |
 | 333 | **All Of Them At Once** | collect all 16 listening types |
 
-### Personal
-
-| # | Achievement | How to earn it |
-|---:|---|---|
-| 334 | **(redacted)** | this one is personal. *(secret)* |
-
 ### Meta
 
 | # | Achievement | How to earn it |
 |---:|---|---|
-| 335 | **Achievement Achieved** | unlock 10 other achievements |
-| 336 | **Plaque Collector** | unlock 25 other achievements |
-| 337 | **Fifty Trophies** | unlock 50 other achievements |
-| 338 | **Wall of Fame** | unlock 100 other achievements |
-| 339 | **Cabinet Overflow** | unlock 150 other achievements |
-| 340 | **Two Hundred Medals** | unlock 200 other achievements |
-| 341 | **Completionist Rising** | unlock 250 other achievements |
-| 342 | **All This For Music** | unlock 280 other achievements |
+| 334 | **Achievement Achieved** | unlock 10 other achievements |
+| 335 | **Plaque Collector** | unlock 25 other achievements |
+| 336 | **Fifty Trophies** | unlock 50 other achievements |
+| 337 | **Wall of Fame** | unlock 100 other achievements |
+| 338 | **Cabinet Overflow** | unlock 150 other achievements |
+| 339 | **Two Hundred Medals** | unlock 200 other achievements |
+| 340 | **Completionist Rising** | unlock 250 other achievements |
+| 341 | **All This For Music** | unlock 280 other achievements |
 
 ### The Last Row Of The Wall
 
 | # | Achievement | How to earn it |
 |---:|---|---|
-| 343 | **Cheated songs sound awful** | you know what you did |
+| 342 | **Cheated songs sound awful** | you know what you did |
 
 ### The Test Toast Button Saga
 
 | # | Achievement | How to earn it |
 |---:|---|---|
-| 344 | **Did you expect something to change?** | fire two test toasts inside one minute *(secret)* |
-| 345 | **Seriously, what do you think is going to happen?** | fire the test toast five times *(secret)* |
-| 346 | **Toast addict** | ten test toasts. it's still just a test *(secret)* |
+| 343 | **Did you expect something to change?** | fire two test toasts inside one minute *(secret)* |
+| 344 | **Seriously, what do you think is going to happen?** | fire the test toast five times *(secret)* |
+| 345 | **Toast addict** | ten test toasts. it's still just a test *(secret)* |
 
 </details>
