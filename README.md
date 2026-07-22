@@ -150,11 +150,9 @@ The Achievements card is part of its own plugin set and can technically be disab
 
 ## Installation
 
-<!-- TODO(Siebe): link your release zip here -->
-
 This ships as a full (patched) Rockbox build for the iPod Classic, not a standalone `.rock` file:
 
-1. Download the release zip.
+1. Download the zip from the [latest release](https://github.com/majorsiebe/Stats_for_iPod/releases/latest).
 2. Extract it to the root of your iPod (it merges into the existing `.rockbox` folder).
 3. Safely eject and reboot the iPod.
 4. You'll find **Wrapped** in the main menu.
