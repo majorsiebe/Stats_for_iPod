@@ -1,0 +1,620 @@
+diff --git a/apps/playback.c b/apps/playback.c
+index 8102f8d917..20596b4092 100644
+--- a/apps/playback.c
++++ b/apps/playback.c
+@@ -365,6 +365,168 @@ static unsigned int position_key = 0;
+ static int playback_log_handle = 0; /* core_alloc handle for playback log buffer */
+ #endif
+ 
++#include "playback_sig.h"
++
++/* Running signature over every byte this device has written to the
++ * playback-log family, so Wrapped can tell device-written history from
++ * PC-edited history. State mirrors the sidecar file at all times: it is
++ * only advanced when bytes actually reach the disk. */
++static struct pbl_sig pbl_sig;
++static bool pbl_sig_ready = false;
++
++/* a crash between the log write and the sig write can orphan at most one
++ * flush; anything bigger than that was not written by us */
++#if (CONFIG_STORAGE & STORAGE_ATA)
++#define PBL_SIG_HEAL_MAX (PLAYBACK_LOG_BUFSZ + MAX_PATH + 64)
++#else
++#define PBL_SIG_HEAL_MAX (MAX_PATH + 64)
++#endif
++
++static void pbl_sig_store(void)
++{
++    int fd = open(PBL_SIG_PATH, O_WRONLY|O_CREAT|O_TRUNC, 0666);
++    if (fd < 0)
++        return;
++    write(fd, &pbl_sig, sizeof(pbl_sig));
++    close(fd);
++}
++
++/* hash bytes [skip, skip+want) of the family concatenation (numbered logs
++ * ascending, live log last - the log readers' order) into *h; returns the
++ * number of bytes actually hashed. want == UINT64_MAX hashes to the end. */
++static uint64_t pbl_family_hash(uint64_t skip, uint64_t want, uint64_t *h)
++{
++    char path[MAX_PATH];
++    unsigned char buf[512];
++    uint64_t done = 0;
++
++    for (int n = 1; want > 0; n++) {
++        if (n <= 9999)
++            snprintf(path, sizeof(path), ROCKBOX_DIR "/playback_%04d.log", n);
++        int fd = open(n <= 9999 ? path : PLAYBACK_LOG_PATH, O_RDONLY);
++        if (fd < 0) {
++            if (n <= 9999) {         /* numbered run ended; the live log */
++                n = 10000 - 1;       /* is the final link (loop n++)     */
++                continue;
++            }
++            break;
++        }
++        ssize_t r;
++        while (want > 0 && (r = read(fd, buf, sizeof(buf))) > 0) {
++            size_t off = 0, use = (size_t)r;
++            if (skip) {
++                if (skip >= (uint64_t)r) { skip -= r; continue; }
++                off = (size_t)skip;
++                use -= off;
++                skip = 0;
++            }
++            if ((uint64_t)use > want)
++                use = (size_t)want;
++            *h = pbl_hash_step(*h, buf + off, use);
++            done += use;
++            want -= use;
++        }
++        close(fd);
++        if (n > 9999)
++            break;
++    }
++    return done;
++}
++
++static uint64_t pbl_family_size(void)
++{
++    char path[MAX_PATH];
++    uint64_t total = 0;
++    for (int n = 1; n <= 9999; n++) {
++        snprintf(path, sizeof(path), ROCKBOX_DIR "/playback_%04d.log", n);
++        int fd = open(path, O_RDONLY);
++        if (fd < 0)
++            break;
++        total += filesize(fd);
++        close(fd);
++    }
++    int fd = open(PLAYBACK_LOG_PATH, O_RDONLY);
++    if (fd >= 0) {
++        total += filesize(fd);
++        close(fd);
++    }
++    return total;
++}
++
++/* Load or establish the signature chain; call before any signed write.
++ * Idempotent, and deliberately NOT INIT_ATTR: enabling logging at runtime
++ * lands here from add_playbacklog long after init sections are gone. */
++static void pbl_sig_init(void)
++{
++    if (pbl_sig_ready)
++        return;
++    pbl_sig_ready = true;
++
++    int fd = open(PBL_SIG_PATH, O_RDONLY);
++    bool have = false;
++    if (fd >= 0) {
++        have = (read(fd, &pbl_sig, sizeof(pbl_sig)) == sizeof(pbl_sig)
++                && pbl_sig.magic == PBL_SIG_MAGIC);
++        close(fd);
++    }
++
++    uint64_t actual = pbl_family_size();
++    if (!have) {
++        /* first run with a signing build: adopt what's here as-is - but
++         * only if this device never had a sig. A sig that has been seen
++         * and is now gone was deleted; the re-bless carries the mark. */
++        uint32_t seen = 0;
++        fd = open(CHEAT_DAT_PATH, O_RDONLY);
++        if (fd >= 0) {
++            uint32_t m = 0, f = 0;
++            if (read(fd, &m, 4) == 4 && m == CHEAT_DAT_MAGIC
++                && read(fd, &f, 4) == 4)
++                seen = f & CHEAT_F_SIG_SEEN;
++            close(fd);
++        }
++        pbl_sig.magic  = PBL_SIG_MAGIC;
++        pbl_sig.flags  = seen ? PBL_SIG_TAINTED : 0;
++        pbl_sig.hash   = PBL_HASH_BASIS;
++        pbl_sig.nbytes = pbl_family_hash(0, UINT64_MAX, &pbl_sig.hash);
++        pbl_sig_store();
++        return;
++    }
++    if (actual == pbl_sig.nbytes)
++        return;                      /* normal boot: chain state is current */
++
++    if (actual > pbl_sig.nbytes
++        && actual - pbl_sig.nbytes <= PBL_SIG_HEAL_MAX) {
++        /* small unsigned tail: probably our own flush whose sig update was
++         * lost to a crash. If the signed prefix still checks out, re-adopt
++         * the tail; if not, the history itself was rewritten. */
++        uint64_t h = PBL_HASH_BASIS;
++        pbl_family_hash(0, pbl_sig.nbytes, &h);
++        if (h == pbl_sig.hash) {
++            pbl_sig.nbytes += pbl_family_hash(pbl_sig.nbytes, UINT64_MAX,
++                                              &pbl_sig.hash);
++            pbl_sig_store();
++            return;
++        }
++    }
++
++    /* the chain is broken in a way we didn't cause: remember that forever
++     * and resync so the log keeps verifying (as tainted) from here on */
++    pbl_sig.flags |= PBL_SIG_TAINTED;
++    pbl_sig.hash   = PBL_HASH_BASIS;
++    pbl_sig.nbytes = pbl_family_hash(0, UINT64_MAX, &pbl_sig.hash);
++    pbl_sig_store();
++}
++
++/* account for bytes that just hit the log file */
++static void pbl_sig_extend(const void *data, size_t n)
++{
++    if (n == 0)
++        return;
++    pbl_sig.hash    = pbl_hash_step(pbl_sig.hash, data, n);
++    pbl_sig.nbytes += n;
++    pbl_sig_store();
++}
++
+ /* Forward declarations */
+ enum audio_start_playback_flags
+ {
+@@ -1281,12 +1443,24 @@ void allocate_playback_log(void)
+             }
+             else
+             {
++                /* rotation is settled; sync the signature chain before the
++                 * first write so the header extends it like any entry */
++                char hdr[MAX_PATH + 64];
++                int hlen;
++                pbl_sig_init();
+ #if CONFIG_RTC
+                 create_datetime_filename(filename, "", " Time ", "", false);
+-                fdprintf(fd, "# Started Ver. %s %s\n", rbversion, filename);
++                hlen = snprintf(hdr, sizeof(hdr), "# Started Ver. %s %s\n",
++                                rbversion, filename);
+ #else
+-                fdprintf(fd, "# Started Ver. %s\n", rbversion);
++                hlen = snprintf(hdr, sizeof(hdr), "# Started Ver. %s\n",
++                                rbversion);
+ #endif
++                if (hlen >= (int)sizeof(hdr))
++                    hlen = sizeof(hdr) - 1;
++                ssize_t wr = write(fd, hdr, hlen);
++                if (wr > 0)
++                    pbl_sig_extend(hdr, wr);
+             }
+             close(fd);
+         }
+@@ -1354,12 +1528,16 @@ void add_playbacklog(struct mp3entry *id3)
+         {
+             return; /* failure */
+         }
++        /* covers logging enabled at runtime (no boot init ran) */
++        pbl_sig_init();
+ #if (CONFIG_STORAGE & STORAGE_ATA)
+         if (buf) /* we have a buffer allocd from core */
+         {
+             buf = core_get_data_pinned(playback_log_handle); /* we might yield - pin it*/
+-            write(fd, buf, used);
++            ssize_t wr = write(fd, buf, used);
+             DEBUGF("%s Writing %lu bytes of buf:\n%s\n", __func__, used, buf);
++            if (wr > 0)
++                pbl_sig_extend(buf, wr);
+             buf[0] = '\0';
+             core_put_data_pinned(buf);
+         }
+@@ -1367,10 +1545,16 @@ void add_playbacklog(struct mp3entry *id3)
+         if (id3)
+         {
+             /* we have the timestamp from when we tried to add to buffer */
++            char entry[MAX_PATH + 48];
+             DEBUGF("LOGGED: time: %lu elapsed %ld/%ld saving file: %s\n",
+                     timestamp, (long)id3->elapsed, (long)id3->length, id3->path);
+-            fdprintf(fd, "%lu:%ld:%ld:%s\n",
++            int elen = snprintf(entry, sizeof(entry), "%lu:%ld:%ld:%s\n",
+                     timestamp, (long)id3->elapsed, (long)id3->length, id3->path);
++            if (elen >= (int)sizeof(entry))
++                elen = sizeof(entry) - 1;
++            ssize_t wr = write(fd, entry, elen);
++            if (wr > 0)
++                pbl_sig_extend(entry, wr);
+         }
+ 
+         close(fd);
+diff --git a/apps/plugin.c b/apps/plugin.c
+index 6c689b21e6..0d82873f29 100644
+--- a/apps/plugin.c
++++ b/apps/plugin.c
+@@ -183,6 +183,23 @@ static void plugin_check_open_close__exit(void)
+ 
+ #endif /* HAVE_PLUGIN_CHECK_OPEN_CLOSE */
+ 
++/* custom addition (this build): while a background achievement toast is on
++ * screen, LCD pushes from every thread except the freezing one are dropped
++ * (checked in the target lcd driver; auto-expires after 5 s as a safety
++ * net so a dying plugin can never freeze the display for good). */
++volatile unsigned int lcd_freeze_thread = 0;
++volatile long lcd_freeze_tick = 0;
++
++static void lcd_freeze_others(bool freeze)
++{
++    if (freeze) {
++        lcd_freeze_tick = current_tick;
++        lcd_freeze_thread = thread_self();
++    } else {
++        lcd_freeze_thread = 0;
++    }
++}
++
+ static const struct plugin_api rockbox_api = {
+     rbversion,
+     &global_settings,
+@@ -875,6 +892,10 @@ static const struct plugin_api rockbox_api = {
+     gui_synclist_scroll_stop,
+     add_event_ex,
+     remove_event_ex,
++#ifdef HAVE_SCREENDUMP
++    screen_dump,
++#endif
++    lcd_freeze_others,
+ };
+ 
+ static int plugin_buffer_handle;
+diff --git a/apps/plugin.h b/apps/plugin.h
+index 50fe1508ab..da74cf8613 100644
+--- a/apps/plugin.h
++++ b/apps/plugin.h
+@@ -181,7 +181,7 @@ int plugin_open(const char *plugin, const char *parameter);
+  * when this happens please take the opportunity to sort in
+  * any new functions "waiting" at the end of the list.
+  */
+-#define PLUGIN_API_VERSION 282
++#define PLUGIN_API_VERSION 283
+ 
+ /* 239 Marks the removal of ARCHOS HWCODEC and CHARCELL */
+ 
+@@ -1038,6 +1038,13 @@ struct plugin_api {
+                                             void *event_data,
+                                             void *user_data),
+                             void *user_data);
++#ifdef HAVE_SCREENDUMP
++    /* custom addition (this build): save the screen as BMP to disk */
++    void (*screen_dump)(void);
++#endif
++    /* custom addition (this build): while a toast banner is up, drop LCD
++       pushes from every thread except the freezing one (auto-expires 5 s) */
++    void (*lcd_freeze_others)(bool freeze);
+ };
+ 
+ /* plugin header */
+diff --git a/apps/plugins/CATEGORIES b/apps/plugins/CATEGORIES
+index bf646a5bf9..db023dc7ed 100644
+--- a/apps/plugins/CATEGORIES
++++ b/apps/plugins/CATEGORIES
+@@ -174,6 +174,9 @@ speedread,viewers
+ star,games
+ starfield,demos
+ stats,apps
++wrapped,apps
++achievements,apps
++achwatch,apps
+ stopwatch,apps
+ sudoku,games
+ test_boost,apps
+diff --git a/apps/plugins/SOURCES b/apps/plugins/SOURCES
+index 797601e4dd..88d6c6a80d 100644
+--- a/apps/plugins/SOURCES
++++ b/apps/plugins/SOURCES
+@@ -33,6 +33,9 @@ settings_dumper.c
+ snow.c
+ sort.c
+ stats.c
++wrapped.c
++achievements.c
++achwatch.c
+ view_text.c
+ #ifdef HAVE_TOUCHSCREEN
+ stopwatch.lua
+diff --git a/apps/plugins/stats.c b/apps/plugins/stats.c
+index 8a511bea42..7110be85eb 100644
+--- a/apps/plugins/stats.c
++++ b/apps/plugins/stats.c
+@@ -1,62 +1,157 @@
+-/***************************************************************************
+- *             __________               __   ___.
+- *   Open      \______   \ ____   ____ |  | _\_ |__   _______  ___
+- *   Source     |       _//  _ \_/ ___\|  |/ /| __ \ /  _ \  \/  /
+- *   Jukebox    |    |   (  <_> )  \___|    < | \_\ (  <_> > <  <
+- *   Firmware   |____|_  /\____/ \___  >__|_ \|___  /\____/__/\_ \
+- *                     \/            \/     \/    \/            \/
+- * $Id$
+- *
+- * Copyright (C) 2005 Jonas Haggqvist
+- *
+- * This program is free software; you can redistribute it and/or
+- * modify it under the terms of the GNU General Public License
+- * as published by the Free Software Foundation; either version 2
+- * of the License, or (at your option) any later version.
+- *
+- * This software is distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY
+- * KIND, either express or implied.
+- *
+- ****************************************************************************/
+ #include "plugin.h"
+-#include "lib/mul_id3.h" /* collect_dir_stats & display_dir_stats */
+-
+-enum plugin_status plugin_start(const void* parameter)
+-{    
+-    (void)parameter;
+-    int button, success;
+-    static struct dir_stats stats;
+-    stats.dirname[0] = '/';
+-    stats.count_all = true;
+-#ifdef HAVE_ADJUSTABLE_CPU_FREQ
+-    rb->cpu_boost(true);
+-#endif
+-    display_dir_stats(&stats);
+-    success = collect_dir_stats(&stats, NULL);
+-#ifdef HAVE_ADJUSTABLE_CPU_FREQ
+-    rb->cpu_boost(false);
+-#endif
+-    if (!success)
+-        return PLUGIN_OK;
+-
+-    display_dir_stats(&stats);
+-#ifdef HAVE_BACKLIGHT
+-#ifdef HAVE_REMOTE_LCD
+-    rb->remote_backlight_on();
+-#endif
+-    rb->backlight_on();
+-#endif
+-    rb->splash(HZ, "Done");
+-    display_dir_stats(&stats);
+-    while (1) {
+-        switch (button = rb->get_action(CONTEXT_STD, TIMEOUT_BLOCK))
+-        {
+-            case ACTION_STD_CANCEL:
++
++/* Apple-iPod-style menu; the Wrapped stats live in wrapped_core.h and are
++ * also built standalone as wrapped.rock */
++
++#define ITEM_H    33
++#define TITLE_H   32
++#define SCREEN_W  320
++#define SCREEN_H  240
++
++#define DEST_FILEBROWSER 1
++#define DEST_DBBROWSER   2
++#define DEST_SETTINGS    3
++#define DEST_SHUFFLE     4
++#define DEST_PLUGINS     5
++#define DEST_WPS         6
++
++static const char *root_items[] = {
++    "Music", "Photos", "Podcasts", "Extras", "Spun", "Settings", "Shuffle Songs"
++};
++static const char *root_items_playing[] = {
++    "Now Playing", "Music", "Photos", "Podcasts", "Extras", "Spun", "Settings", "Shuffle Songs"
++};
++static const char *music_items[] = {
++    "Artists", "Albums", "Songs", "Genres", "Composers", "Playlists"
++};
++#define MUSIC_COUNT 6
++#define ROOT_COUNT  7   /* not playing */
++#define VISIBLE     ((SCREEN_H - TITLE_H) / ITEM_H)
++
++static int level = 0;
++static int sel[2] = {0, 0};
++static int top[2] = {0, 0};
++
++#include "wrapped_core.h"
++
++/* ============================================================ */
++
++static void draw_menu(const char **items, int count, const char *title)
++{
++    rb->lcd_setfont(FONT_SYSFIXED);
++    rb->lcd_set_background(LCD_RGBPACK(255, 255, 255));
++    rb->lcd_clear_display();
++
++    rb->lcd_set_foreground(LCD_RGBPACK(50, 50, 50));
++    rb->lcd_fillrect(0, 0, SCREEN_W, TITLE_H);
++    rb->lcd_set_background(LCD_RGBPACK(50, 50, 50));
++    rb->lcd_set_foreground(LCD_RGBPACK(255, 255, 255));
++
++    struct mp3entry *track = rb->audio_current_track();
++    if (rb->audio_status() && track && track->title) {
++        rb->lcd_putsxy(12, 3, title);
++        rb->lcd_putsxy(12, 17, track->title);
++    } else {
++        rb->lcd_putsxy(12, 12, title);
++    }
++
++    int visible = (count < VISIBLE) ? count : VISIBLE;
++    for (int i = 0; i < visible; i++) {
++        int idx = top[level] + i;
++        if (idx >= count) break;
++        int y = TITLE_H + i * ITEM_H;
++
++        if (idx == sel[level]) {
++            rb->lcd_set_foreground(LCD_RGBPACK(43, 114, 215));
++            rb->lcd_fillrect(0, y, SCREEN_W, ITEM_H);
++            rb->lcd_set_background(LCD_RGBPACK(43, 114, 215));
++            rb->lcd_set_foreground(LCD_RGBPACK(255, 255, 255));
++        } else {
++            rb->lcd_set_background(LCD_RGBPACK(255, 255, 255));
++            rb->lcd_set_foreground(LCD_RGBPACK(30, 30, 30));
++        }
++
++        rb->lcd_putsxy(15, y + 9, items[idx]);
++        rb->lcd_putsxy(SCREEN_W - 16, y + 9, ">");
++
++        rb->lcd_set_foreground(LCD_RGBPACK(210, 210, 210));
++        rb->lcd_hline(0, SCREEN_W, y + ITEM_H - 1);
++    }
++
++    rb->lcd_update();
++}
++
++enum plugin_status plugin_start(const void *parameter)
++{
++    int *dest = (int*)parameter;
++
++    while (true) {
++        bool playing = rb->audio_status() != 0;
++        const char **items;
++        int count;
++        const char *title;
++
++        if (level == 0) {
++            items = playing ? root_items_playing : root_items;
++            count = playing ? (ROOT_COUNT + 1) : ROOT_COUNT;
++            title = "iPod";
++            if (sel[0] >= count) sel[0] = count - 1;
++        } else {
++            items = music_items;
++            count = MUSIC_COUNT;
++            title = "Music";
++        }
++
++        draw_menu(items, count, title);
++
++        int btn = rb->button_get(true);
++
++        if (btn == SYS_USB_CONNECTED)
++            return PLUGIN_USB_CONNECTED;
++
++        /* Continuous wheel rotation posts repeat-flagged events (the first
++         * event of a touch is plain, every further one has BUTTON_REPEAT
++         * set), so match with the flag masked off or we only ever move one
++         * item per touch. Step count comes from the driver's velocity. */
++        int base = btn & ~BUTTON_REPEAT;
++        if (base == BUTTON_SCROLL_BACK || base == BUTTON_SCROLL_FWD) {
++            int step = wheel_steps();
++            int next = sel[level] + (base == BUTTON_SCROLL_FWD ? step : -step);
++            if (next < 0) next = 0;
++            if (next >= count) next = count - 1;
++            sel[level] = next;
++            if (sel[level] < top[level])
++                top[level] = sel[level];
++            if (sel[level] >= top[level] + VISIBLE)
++                top[level] = sel[level] - VISIBLE + 1;
++        } else if (btn == BUTTON_SELECT) {
++            if (level == 0) {
++                if (playing && sel[0] == 0) {
++                    if (dest) *dest = DEST_WPS;
++                    return PLUGIN_OK;
++                }
++                int item = sel[0] - (playing ? 1 : 0);
++                switch (item) {
++                    case 0: level = 1; break;                                   /* Music   */
++                    case 1: if (dest) *dest = DEST_FILEBROWSER; return PLUGIN_OK; /* Photos  */
++                    case 2: if (dest) *dest = DEST_FILEBROWSER; return PLUGIN_OK; /* Podcasts*/
++                    case 3: if (dest) *dest = DEST_PLUGINS;     return PLUGIN_OK; /* Extras  */
++                    case 4: {                                                    /* Wrapped */
++                        int st = wrapped_show();
++                        if (st == PLUGIN_USB_CONNECTED) return PLUGIN_USB_CONNECTED;
++                        break;
++                    }
++                    case 5: if (dest) *dest = DEST_SETTINGS;    return PLUGIN_OK; /* Settings*/
++                    case 6: if (dest) *dest = DEST_SHUFFLE;     return PLUGIN_OK; /* Shuffle */
++                    default: break;
++                }
++            } else if (level == 1) {
++                if (dest) *dest = (sel[1] == 2 || sel[1] == 5) ? DEST_FILEBROWSER : DEST_DBBROWSER;
+                 return PLUGIN_OK;
+-            default:
+-                if (rb->default_event_handler(button) == SYS_USB_CONNECTED)
+-                    return PLUGIN_USB_CONNECTED;
++            }
++        } else if (btn == BUTTON_MENU) {
++            if (level > 0) level--;
++            else return PLUGIN_OK;
+         }
+     }
+-    return PLUGIN_OK;
+ }
+diff --git a/apps/root_menu.c b/apps/root_menu.c
+index 35cd63d5fb..35794cb3e2 100644
+--- a/apps/root_menu.c
++++ b/apps/root_menu.c
+@@ -510,6 +510,16 @@ MENUITEM_RETURNVALUE(db_browser, ID2P(LANG_TAGCACHE), GO_TO_DBBROWSER,
+ MENUITEM_RETURNVALUE(rocks_browser, ID2P(LANG_PLUGINS), GO_TO_BROWSEPLUGINS,
+                         NULL, Icon_Plugin);
+ 
++/* custom: launch the Wrapped listening-stats plugin straight from the
++ * root menu (needs "wrapped" in the "root menu order" cfg to show up) */
++static int wrapped_launch(void)
++{
++    plugin_load(PLUGIN_APPS_DIR "/wrapped.rock", NULL);
++    return 0;
++}
++MENUITEM_FUNCTION(wrapped_item, 0, "Spun", wrapped_launch,
++                        NULL, Icon_Audio);
++
+ static char *get_wps_item_name(int selected_item, void * data,
+                                char *buffer, size_t buffer_len)
+ {
+@@ -559,6 +569,7 @@ static struct menu_table menu_table[] = {
+ #endif
+     { "playlists", &playlists },
+     { "plugins", &rocks_browser },
++    { "wrapped", &wrapped_item },
+     { "system_menu", &system_menu_ },
+     { "shortcuts", &shortcut_menu },
+ };
+@@ -941,6 +952,14 @@ void root_menu(void)
+     push_current_activity(ACTIVITY_MAINMENU);
+     next_screen = root_menu_setup_screens();
+ 
++    /* custom addition (this build): auto-start the achievement watcher TSR
++     * once per boot, unless the user turned it off from its own menu
++     * (it drops a flag file). It parses the log, registers its playback
++     * hook and returns immediately. */
++    if (file_exists(PLUGIN_APPS_DIR "/achwatch.rock")
++        && !file_exists(ROCKBOX_DIR "/achwatch_off"))
++        plugin_load(PLUGIN_APPS_DIR "/achwatch.rock", (void *)1);
++
+     while (true)
+     {
+         switch (next_screen)
+diff --git a/firmware/target/arm/s5l8702/lcd-s5l8702.c b/firmware/target/arm/s5l8702/lcd-s5l8702.c
+index cc0fa37605..d4823cae15 100644
+--- a/firmware/target/arm/s5l8702/lcd-s5l8702.c
++++ b/firmware/target/arm/s5l8702/lcd-s5l8702.c
+@@ -385,6 +385,22 @@ void lcd_update_rect(int x, int y, int width, int height)
+     fb_data* p = FBADDR(x,y);
+     uint16_t* out = lcd_dblbuf[0];
+ 
++#ifndef BOOTLOADER
++    /* custom addition (this build): while an achievement toast is up, only
++     * the thread that froze the display may push to the panel; the freeze
++     * self-expires so it can never wedge the UI (state lives in plugin.c) */
++    {
++        extern volatile unsigned int lcd_freeze_thread;
++        extern volatile long lcd_freeze_tick;
++        if (lcd_freeze_thread) {
++            if (TIME_AFTER(current_tick, lcd_freeze_tick + 5 * HZ))
++                lcd_freeze_thread = 0;
++            else if (thread_self() != lcd_freeze_thread)
++                return;
++        }
++    }
++#endif
++
+     /* FIXME: ISR()->panicf()->lcd_update() blocks forever */
+     mutex_lock(&lcd_mutex);
+     if (lcd_ispowered)

@@ -159,4 +159,17 @@ This ships as a full (patched) Rockbox build for the iPod Classic, not a standal
 
 ## Building from source
 
-Built like any other Rockbox target (`ipod6g`) with the standard Rockbox cross-compilation toolchain: configure a build directory for the iPod Classic, then `make && make zip` and extract the resulting `rockbox.zip` onto the device. The stats/achievements code lives in `apps/plugins/` (`wrapped_core.h`, `achievements_core.h`, `ach_table.h` and their thin plugin wrappers), with small hooks in core playback code for logging.
+The source lives in [`src/`](src/), laid out in Rockbox-tree paths:
+
+- `src/apps/plugins/` — the plugin code: `wrapped_core.h` (parser + cards), `achievements_core.h` (badge engine), `ach_table.h` (the badge table), and the thin plugin wrappers (`wrapped.c`, `achievements.c`, `stats.c` is in the patch, `achwatch.c`)
+- `src/apps/playback_sig.h` — the shared log-signature format
+- `src/spun_core.patch` — every change to Rockbox core: playback logging + signing, plugin API additions, the root menu entry, and an LCD hook the achievement toasts use
+
+To build:
+
+1. Clone [Rockbox](https://github.com/Rockbox/rockbox) and check out commit `4c60fe95fc` (the base this was developed against — nearby commits will probably apply too, but you're on your own).
+2. From the Rockbox tree root: `git apply spun_core.patch`
+3. Copy the contents of `src/apps/` over the tree's `apps/` folder.
+4. Build the normal Rockbox way for the iPod Classic (`ipod6g`): standard cross-compilation toolchain, `tools/configure`, `make`, `make zip`, extract the resulting `rockbox.zip` onto the device. The UI simulator target works too and is much less painful for poking around.
+
+If you read the source closely you may notice the build can grow one extra achievement from a header that is not included here. That is intentional, and it is nobody else's business.
