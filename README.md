@@ -153,9 +153,12 @@ The Achievements card is part of its own plugin set and can technically be disab
 This ships as a full (patched) Rockbox build for the iPod Classic, not a standalone `.rock` file:
 
 1. Download the zip from the [latest release](https://github.com/majorsiebe/Stats_for_iPod/releases/latest).
-2. Extract it to the root of your iPod (it merges into the existing `.rockbox` folder).
-3. Safely eject and reboot the iPod.
-4. You'll find **Spun** in the main menu.
+2. **Back up your `.rockbox` folder first** — this zip replaces the main Rockbox binary, so if you run another custom build, it will be overwritten.
+3. Extract the zip to the root of your iPod (it merges into the existing `.rockbox` folder).
+4. Safely eject and reboot the iPod.
+5. You'll find **Spun** in the main menu.
+
+**WARNING:** updating Rockbox the official way (Rockbox Utility or an official build zip) will overwrite this build's patched core, and Spun will disappear or break. After any official update, simply reinstall from the release zip here.
 
 ## Building from source
 
