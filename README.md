@@ -6,7 +6,7 @@ Written by Siebe Majoor ([@majorsiebe](https://github.com/majorsiebe), AKA rabar
 
 **⚠️ Contains spoilers!** Parts of this plugin are meant to be discovered. The spoiler-heavy bits below are collapsed — expand them at your own risk.
 
-![intro card](screenshots/card_01.png)
+<p><img src="screenshots/card_01.png" width="320" alt="intro card"> <img src="screenshots/counter.gif" width="320" alt="the 7-segment counter, live"></p>
 
 > **DISCLAIMER:** I am NOT a C dev, I am a Food Tech student. This project was built with significant help from Claude (AI) and I barely understand most of the technical details. You are free to do with the source code as you please, but if you break something, you keep both pieces, and I will not be held responsible.
 >
