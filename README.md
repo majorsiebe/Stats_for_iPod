@@ -2,7 +2,7 @@
 
 *Spotify Wrapped, but it lives on your iPod.*
 
-Written by Siebe Majoor ([@majorsiebe](https://github.com/majorsiebe), AKA rabarber man) — last updated 22-07-2026
+Written by Siebe Majoor ([@majorsiebe](https://github.com/majorsiebe), AKA rabarber man) — last updated 23-07-2026
 
 **Contains spoilers!** Parts of this plugin are meant to be discovered. The spoiler-heavy bits below are collapsed — expand them at your own risk.
 
@@ -20,7 +20,7 @@ You are looking at a Rockbox plugin that tracks what you listen to and presents 
 
 I got the idea shortly after switching fully to iPods for music and wondering just how much I actually listened. A couple of afternoons of thinking later, a basic version of this came out. It has since been expanded significantly, but instead of wasting your time explaining it in unnecessary detail, let me show you the features.
 
-Put simply, the plugin reads Rockbox's already-existing `playback.log` file and presents it in such a way that normal people can read it. If you already have logging enabled, the plugin will show your stats immediately, with some limitations (more on that in [Known Limitations and Bugs](#known-limitations-and-bugs)).
+Put simply, the plugin reads Rockbox's already-existing `playback.log` file and presents it in such a way that normal people can read it. If you already have logging enabled, the plugin will show your stats immediately, with some limitations (more on that in [Known Limitations and Bugs](#known-limitations-and-bugs)). If you don't, **Spun has nothing to read and every card will be empty** — see [Enabling logging](#enabling-logging-required), it takes one minute.
 
 ## Features
 
@@ -157,8 +157,20 @@ This ships as a full (patched) Rockbox build for the iPod Classic, not a standal
 3. Extract the zip to the root of your iPod (it merges into the existing `.rockbox` folder).
 4. Safely eject and reboot the iPod.
 5. You'll find **Spun** in the main menu.
+6. **Turn on logging** (see the next section) — without it, Spun stays empty forever.
 
 **WARNING:** updating Rockbox the official way (Rockbox Utility or an official build zip) will overwrite this build's patched core, and Spun will disappear or break. After any official update, simply reinstall from the release zip here.
+
+## Enabling logging (REQUIRED)
+
+Spun does not track anything itself — it reads the log Rockbox writes. No logging, no stats. Do this once:
+
+1. **Set the clock first**: Settings → Time & Date. This matters more than you'd think — plays logged with an unset clock (the iPod thinks it's the year 2000) are thrown away as garbage, and a wrong date puts your listening in the wrong week or year.
+2. **Turn on logging**: Settings → Playback → Logging → on.
+3. **Reboot the iPod.** This step is NOT optional: Rockbox only checks the logging setting at boot, so until you restart, nothing is being logged even though the setting says on.
+4. That's it. Play some music, and Spun will have something to show. The log lives at `/.rockbox/playback.log` if you ever want to peek at (or back up) your raw history.
+
+Two things to keep in mind: always shut down properly (hold PLAY/PAUSE) — a forced reset loses the last few log entries — and remember the log only starts from the day you enable it. Your stats begin today, not when you bought the iPod. Give it a week before judging your cards.
 
 ## Building from source
 
