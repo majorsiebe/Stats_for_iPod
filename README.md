@@ -4,7 +4,7 @@
 
 Written by Siebe Majoor ([@majorsiebe](https://github.com/majorsiebe), AKA rabarber man) — last updated 22-07-2026
 
-**⚠️ Contains spoilers!** Parts of this plugin are meant to be discovered. The spoiler-heavy bits below are collapsed — expand them at your own risk.
+**Contains spoilers!** Parts of this plugin are meant to be discovered. The spoiler-heavy bits below are collapsed — expand them at your own risk.
 
 ![the deck in action](screenshots/counter.gif)
 
@@ -44,7 +44,7 @@ As of writing this, the deck includes:
 - A final card with your year at a glance — nice for sharing, contains less information than the year overviews
 
 <details>
-<summary><b>📸 Click to see all 16 cards</b> (spoilers, obviously)</summary>
+<summary><b>Click to see all 16 cards</b> (spoilers, obviously)</summary>
 
 | | |
 |---|---|
@@ -92,7 +92,7 @@ Similar to the Spotify Listening Personality: a 4-letter code based on 4 stats, 
 If you'd rather discover the 16 types yourself, do **not** expand this:
 
 <details>
-<summary><b>🚨 SPOILERS: the full Listening Type list</b></summary>
+<summary><b>SPOILERS: the full Listening Type list</b></summary>
 
 | Code | Type | |
 |---|---|---|
