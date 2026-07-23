@@ -6,7 +6,7 @@ Written by Siebe Majoor ([@majorsiebe](https://github.com/majorsiebe), AKA rabar
 
 **⚠️ Contains spoilers!** Parts of this plugin are meant to be discovered. The spoiler-heavy bits below are collapsed — expand them at your own risk.
 
-<p><img src="screenshots/card_01.png" width="320" alt="intro card"> <img src="screenshots/counter.gif" width="320" alt="the 7-segment counter, live"></p>
+![the deck in action](screenshots/counter.gif)
 
 > **DISCLAIMER:** I am NOT a C dev, I am a Food Tech student. This project was built with significant help from Claude (AI) and I barely understand most of the technical details. You are free to do with the source code as you please, but if you break something, you keep both pieces, and I will not be held responsible.
 >
@@ -144,7 +144,7 @@ The Achievements card is part of its own plugin set and can technically be disab
 - Sometimes, the year text does not appear on the start card. I do not know why this happens.
 - The "Crunching your Year" text overlaps with other announcement texts.
 - The Top Albums card can render album art in place of the rank numbers. It only reads loose cover files (`cover.jpg`, `folder.jpg`, etc.) inside each album's folder — embedded tag art is not supported, so depending on how your library stores art, you may never see it. Consider this feature untested/unfinished.
-- The 7-segment counter animation takes a while and stutters slightly.
+- The 7-segment counter animation takes a while and stutters slightly on the real device. The simulator runs it perfectly smooth (see the animation above), so this appears to be a hardware limitation.
 - Scrolling is a bit sensitive. In my experience you get used to it.
 - Song/Album names are not always accurate depending on how they're stored on the device. Simplest fix is labelling correctly. ¯\\\_(ツ)\_/¯
 
