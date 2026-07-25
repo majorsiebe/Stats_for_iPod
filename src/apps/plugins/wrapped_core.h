@@ -1551,7 +1551,13 @@ static bool nav_button(int b)
 static void save_card(void)
 {
 #ifdef HAVE_SCREENDUMP
+#ifdef HAVE_ADJUSTABLE_CPU_FREQ
+    rb->cpu_boost(true);
+#endif
     rb->screen_dump();
+#ifdef HAVE_ADJUSTABLE_CPU_FREQ
+    rb->cpu_boost(false);
+#endif
     rb->splash(HZ * 2/3, "Saved as BMP (device root)");
 #else
     rb->splash(HZ, "No screendump in this build");
@@ -1602,8 +1608,14 @@ static void export_deck(void)
 #ifdef HAVE_SCREENDUMP
     rb->mkdir("/wrapped_cards");
     export_mode = true;
+#ifdef HAVE_ADJUSTABLE_CPU_FREQ
+    /* PortalPlayer targets idle at 24-30MHz; unboosted, each card takes
+     * tens of seconds to render and convert */
+    rb->cpu_boost(true);
+#endif
     int saved = 0;
     for (int i = 0; i < N_CARDS; i++) {
+        rb->splashf(0, "Saving card %d of %d...", i + 1, N_CARDS);
         draw_card(i, 0);
         rb->screen_dump();
         char dst[40];
@@ -1612,6 +1624,9 @@ static void export_deck(void)
             saved++;
         rb->button_clear_queue();        /* nav during export goes nowhere */
     }
+#ifdef HAVE_ADJUSTABLE_CPU_FREQ
+    rb->cpu_boost(false);
+#endif
     export_mode = false;
     rb->splashf(HZ * 2, "%d cards saved in /wrapped_cards", saved);
 #else

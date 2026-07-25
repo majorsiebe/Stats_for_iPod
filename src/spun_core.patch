@@ -618,3 +618,30 @@ index cc0fa37605..d4823cae15 100644
      /* FIXME: ISR()->panicf()->lcd_update() blocks forever */
      mutex_lock(&lcd_mutex);
      if (lcd_ispowered)
+diff --git a/firmware/target/arm/ipod/video/lcd-video.c b/firmware/target/arm/ipod/video/lcd-video.c
+index 27d889aafa..cc7e6539f4 100644
+--- a/firmware/target/arm/ipod/video/lcd-video.c
++++ b/firmware/target/arm/ipod/video/lcd-video.c
+@@ -394,6 +394,22 @@ void lcd_update_rect(int x, int y, int width, int height)
+         return;
+ #endif
+
++#ifndef BOOTLOADER
++    /* custom addition (this build): while an achievement toast is up, only
++     * the thread that froze the display may push to the BCM; the freeze
++     * self-expires so it can never wedge the UI (state lives in plugin.c) */
++    {
++        extern volatile unsigned int lcd_freeze_thread;
++        extern volatile long lcd_freeze_tick;
++        if (lcd_freeze_thread) {
++            if (TIME_AFTER(current_tick, lcd_freeze_tick + 5 * HZ))
++                lcd_freeze_thread = 0;
++            else if (thread_self() != lcd_freeze_thread)
++                return;
++        }
++    }
++#endif
++
+     if (x + width >= LCD_WIDTH)
+         width = LCD_WIDTH - x;
+     if (y + height >= LCD_HEIGHT)
