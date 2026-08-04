@@ -70,6 +70,9 @@ static int filter_year = 0;
 #define WEEK_ACTIVE_SECS (30*60)     /* a week turns green at 30+ minutes */
 #define SUPER_WEEK_SECS  (1440*60)   /* 24h+ in one week = gold "superweek" */
 #define ULTRA_WEEK_SECS  (2880*60)   /* 48h+ = diamond "ultraweek" (touch grass) */
+#define HYPER_WEEK_SECS  (4320*60)   /* 72h+ = violet "hyperweek" */
+#define GIGA_WEEK_SECS   (5760*60)   /* 96h+ = ember "gigaweek" */
+#define OMEGA_WEEK_SECS  (7200*60)   /* 120h+ = white-hot "omegaweek" */
 
 /* week-bar geometry, shared by the year card and the week browser */
 #define WB_PITCH 5
@@ -81,6 +84,31 @@ static int filter_year = 0;
 #define COL_GOLD_HI   LCD_RGBPACK(255,240,170)
 #define COL_ICE       LCD_RGBPACK(120,220,255)
 #define COL_ICE_HI    LCD_RGBPACK(235,252,255)
+#define COL_VIO       LCD_RGBPACK(200,135,255)
+#define COL_VIO_HI    LCD_RGBPACK(240,225,255)
+#define COL_EMBER     LCD_RGBPACK(255,120, 85)
+#define COL_EMBER_HI  LCD_RGBPACK(255,220,195)
+#define COL_OMEGA     LCD_RGBPACK(255,255,255)
+#define COL_OMEGA_HI  LCD_RGBPACK(190,245,255)
+#define COL_PINK      LCD_RGBPACK(255,145,205)
+#define COL_PINK_HI   LCD_RGBPACK(255,222,240)
+
+/* week tiers: 0 = quiet .. 5 = omegaweek. The bar pill, week-card kicker/
+ * tagline and week-browser footer all key off the same ladder; thresholds
+ * match the AM_WEEK_MINS badges in ach_table.h (1440/2880/4320/5760/7200) */
+static const unsigned tier_secs[] = { 0, SUPER_WEEK_SECS, ULTRA_WEEK_SECS,
+                                      HYPER_WEEK_SECS, GIGA_WEEK_SECS,
+                                      OMEGA_WEEK_SECS };
+static const unsigned tier_col[]  = { 0, COL_GOLD, COL_ICE, COL_VIO,
+                                      COL_EMBER, COL_OMEGA };
+static const unsigned tier_hi[]   = { 0, COL_GOLD_HI, COL_ICE_HI, COL_VIO_HI,
+                                      COL_EMBER_HI, COL_OMEGA_HI };
+static int week_tier(unsigned secs)
+{
+    int t = 5;
+    while (t > 0 && secs < tier_secs[t]) t--;
+    return t;
+}
 static unsigned week_secs[N_WEEKS];
 static int  n_weeks = 52;            /* Mon-aligned weeks touching the year */
 static int  display_year;            /* year the progress card describes */
@@ -299,7 +327,9 @@ static struct {
     int  next;   /* playback-family chain: >0 = numbered log to try next,
                     0 = live log is next, -1 = single file / chain done */
 } lrd = { .fd = -1, .next = -1 };
-static char lrd_buf[4096];
+/* 16 KB: the 5G-class targets pay dearly per read call, and the family
+ * can be half a megabyte - fewer, fatter reads (costs static RAM, fine) */
+static char lrd_buf[16384];
 
 /* raw-byte hash of a full family pass, accumulated at the refill point
  * below; only playback_parse turns it on (probes stop early) */
@@ -474,34 +504,93 @@ static bool cheat_rigged(void)
     return (cheat_flags & CHEAT_F_CHEATED) || cheat_live == 1;
 }
 
+/* fresh stats-free re-hash of the on-disk family, re-opening every file.
+ * Only used to double-check a guilty verdict, so it may clobber lrd and
+ * lrd_hash state. false = not even the live log would open. */
+static bool family_rehash(uint64_t *h, uint64_t *n)
+{
+    char line[640];
+    if (!lrd_open_playback())
+        return false;
+    lrd_hash = PBL_HASH_BASIS;
+    lrd_hash_n = 0;
+    lrd_hash_on = true;
+    while (lrd_line(line, sizeof(line)))
+        ;
+    lrd_hash_on = false;
+    lrd_close();
+    *h = lrd_hash;
+    *n = lrd_hash_n;
+    return true;
+}
+
 /* verdict for a playback-family crunch: sig_pre was read before the parse,
- * lrd_hash/lrd_hash_n cover every raw byte the parse consumed */
+ * lrd_hash/lrd_hash_n cover every raw byte the parse consumed.
+ *
+ * Guilt never latches from a single look: the achwatch rebase fires the
+ * instant USB unplugs and can race the remount, and to a one-shot verifier
+ * a transiently unopenable playback_0001.log is indistinguishable from a
+ * truncation cheat (2026-08-03: a phone unplug convicted a clean log that
+ * way). A guilty look is re-tried on fresh reads with a pause for the
+ * storage to settle; only guilt that survives every look sticks. The taint
+ * flag is exempt - it lives inside the sig itself, so no re-read can
+ * excuse it. Real cheats just spend a few extra seconds being sure. */
+#define CHEAT_LOOKS 6                     /* first look + 5 settled retries */
+static bool cheat_healed;   /* verdict went guilty->innocent on a retry: the
+                             * parse raced the disk, its aggregates are just
+                             * as suspect (wrapped_reload crunches again) */
+static bool ach_reset_ran __attribute__((unused));  /* "start over" wiped the disk out from under
+                             * whatever UI is currently open: fold gently */
+
 static void cheat_judge(const struct pbl_sig *sig_pre, bool sig_pre_ok)
 {
+    struct pbl_sig sig;
+    bool     sig_ok = sig_pre_ok;
+    uint64_t h = lrd_hash, n = lrd_hash_n;
+
     cheat_flags_load();
-    if (!sig_pre_ok) {
-        /* no sig at all: an old core build never signed (fair), unless one
-         * was seen before and has since vanished (not fair) */
-        cheat_live = (cheat_flags & CHEAT_F_SIG_SEEN) ? 1 : -1;
-        if (cheat_live == 1)
-            cheat_mark(CHEAT_F_CHEATED);
+    cheat_healed = false;
+    /* a pending "start over": the disk is mid-reset on purpose; the core
+     * consumes the flag and re-blesses at the next boot */
+    if (rb->file_exists(SPUN_RESET_FLAG)) {
+        cheat_live = -1;
         return;
     }
-    cheat_mark(CHEAT_F_SIG_SEEN);
-    if (sig_pre->flags & PBL_SIG_TAINTED) {
-        cheat_live = 1;
-        cheat_mark(CHEAT_F_CHEATED);
-        return;
+    if (sig_ok)
+        sig = *sig_pre;
+
+    for (int look = 1; ; look++) {
+        if (sig_ok) {
+            cheat_mark(CHEAT_F_SIG_SEEN);
+            if (sig.flags & PBL_SIG_TAINTED) {
+                cheat_live = 1;
+                cheat_mark(CHEAT_F_CHEATED);
+                return;
+            }
+            if (n == sig.nbytes && h == sig.hash) {
+                cheat_live = 0;
+                cheat_healed = (look > 1);
+                return;
+            }
+        } else if (!(cheat_flags & CHEAT_F_SIG_SEEN)) {
+            /* no sig and none ever seen: an old core build never signed */
+            cheat_live = -1;
+            return;
+        }
+        if (look == CHEAT_LOOKS)
+            break;
+        rb->sleep(HZ);
+        sig_ok = sig_read(&sig);
+        if (!family_rehash(&h, &n)) {
+            h = 0;             /* family unreadable: guilty for this look, */
+            n = 0;             /* keep watching                            */
+        }
     }
-    if (lrd_hash_n == sig_pre->nbytes && lrd_hash == sig_pre->hash) {
-        cheat_live = 0;
-        return;
-    }
-    /* mismatch - but if the core flushed a track mid-parse it moved both
-     * the log and the sig under us; that's not a cheat, just no verdict */
-    struct pbl_sig now;
-    if (sig_read(&now)
-        && (now.nbytes != sig_pre->nbytes || now.hash != sig_pre->hash)) {
+
+    /* guilt survived every look. One excuse left: the core flushing tracks
+     * moved the log and the sig under us the whole time - churn, no verdict */
+    if (sig_pre_ok && sig_ok
+        && (sig.nbytes != sig_pre->nbytes || sig.hash != sig_pre->hash)) {
         cheat_live = -1;
         return;
     }
@@ -515,6 +604,11 @@ static void cheat_judge(const struct pbl_sig *sig_pre, bool sig_pre_ok)
 static void cheat_judge_scrob(void)
 {
     cheat_flags_load();
+    cheat_healed = false;
+    if (rb->file_exists(SPUN_RESET_FLAG)) {
+        cheat_live = -1;
+        return;
+    }
     struct pbl_sig s;
     if (sig_read(&s) || (cheat_flags & CHEAT_F_SIG_SEEN)) {
         cheat_live = 1;
@@ -1510,14 +1604,67 @@ static void fit_text(const char *s, int maxw, char *out, int outsz)
     if (len >= 2) { out[len-1] = '.'; out[len] = '.'; out[len+1] = '\0'; }
 }
 
-/* pill-style page indicator at the bottom */
+/* ---- deck customization: hidden cards ----
+ * One bit per card enum id, persisted in wrapped_hide.dat. Purely
+ * cosmetic state: a future version that reorders the deck merely hides
+ * different cards until the owner re-picks. The intro, the outro and
+ * the interactive cards (year, achievements) are structural and stay. */
+#define HIDE_DAT_PATH  "/.rockbox/wrapped_hide.dat"
+#define HIDE_DAT_MAGIC 0x57486431UL   /* "WHd1" */
+static uint32_t hide_mask;
+
+static bool card_hideable(int idx)
+{
+    if (idx == CARD_INTRO || idx == CARD_OUTRO || idx == CARD_YEAR)
+        return false;
+#ifdef WRAPPED_WITH_ACH
+    if (idx == CARD_ACH)
+        return false;
+#endif
+    return true;
+}
+
+static bool card_hidden(int idx)
+{
+    return card_hideable(idx) && ((hide_mask >> idx) & 1);
+}
+
+static void hide_load(void)
+{
+    hide_mask = 0;
+    int fd = rb->open(HIDE_DAT_PATH, O_RDONLY);
+    if (fd < 0)
+        return;
+    uint32_t m = 0, v = 0;
+    if (rb->read(fd, &m, 4) == 4 && m == HIDE_DAT_MAGIC
+        && rb->read(fd, &v, 4) == 4)
+        hide_mask = v;
+    rb->close(fd);
+}
+
+static void hide_save(void)
+{
+    int fd = rb->open(HIDE_DAT_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0)
+        return;
+    uint32_t m = HIDE_DAT_MAGIC;
+    rb->write(fd, &m, 4);
+    rb->write(fd, &hide_mask, 4);
+    rb->close(fd);
+}
+
+/* pill-style page indicator at the bottom (hidden cards get no dot) */
 static void page_dots(int idx, const struct theme *th)
 {
     int y = SCREEN_H - 11, dot = 5, cur = 15, gap = 5;
     int totw = -gap;
-    for (int i = 0; i < N_CARDS; i++) totw += ((i == idx) ? cur : dot) + gap;
+    for (int i = 0; i < N_CARDS; i++) {
+        if (card_hidden(i)) continue;
+        totw += ((i == idx) ? cur : dot) + gap;
+    }
     int x = (SCREEN_W - totw) / 2;
     for (int i = 0; i < N_CARDS; i++) {
+        if (card_hidden(i)) continue;
         int w = (i == idx) ? cur : dot;
         unsigned c = (i == idx) ? th->accent
                                  : blend565(grad_at(th, y), LCD_RGBPACK(255,255,255), 70);
@@ -1613,9 +1760,13 @@ static void export_deck(void)
      * tens of seconds to render and convert */
     rb->cpu_boost(true);
 #endif
-    int saved = 0;
+    int saved = 0, total = 0, nth = 0;
+    for (int i = 0; i < N_CARDS; i++)
+        if (!card_hidden(i)) total++;
     for (int i = 0; i < N_CARDS; i++) {
-        rb->splashf(0, "Saving card %d of %d...", i + 1, N_CARDS);
+        if (card_hidden(i))              /* hidden from the deck, hidden */
+            continue;                    /* from the export too          */
+        rb->splashf(0, "Saving card %d of %d...", ++nth, total);
         draw_card(i, 0);
         rb->screen_dump();
         char dst[40];
@@ -1874,8 +2025,10 @@ static int year_cur_week(void)
     return w >= n_weeks ? n_weeks - 1 : w;
 }
 
-/* the week bar: gold pill = superweek, green = active, dim = quiet/future;
- * cursor >= 0 draws a white selection frame around that week */
+/* the week bar: gold pill = superweek, tinted pill+sparkle = ultraweek and
+ * up (violet/ember/white as the tiers climb, hyper+ adds a second sparkle),
+ * green = active, dim = quiet/future; cursor >= 0 draws a white selection
+ * frame around that week */
 static void draw_week_bar(const struct theme *th, int cursor)
 {
     int cur_week = year_cur_week();
@@ -1883,17 +2036,24 @@ static void draw_week_bar(const struct theme *th, int cursor)
     rb->lcd_set_drawmode(DRMODE_SOLID);
     for (int i = 0; i < n_weeks; i++) {
         int x = WB_X + i * WB_PITCH;
-        if (week_secs[i] >= ULTRA_WEEK_SECS) {
+        int t = week_tier(week_secs[i]);
+        if (t >= 2) {
             /* diamond pill with a sparkle: the device never left the hands */
             int cx = x + WB_SEGW/2;
-            draw_capsule(th, cx, WB_Y - 3, cx, WB_Y + WB_H + 2, 2, COL_ICE);
-            draw_capsule(th, cx, WB_Y, cx, WB_Y + WB_H - 1, 1, COL_ICE_HI);
+            draw_capsule(th, cx, WB_Y - 3, cx, WB_Y + WB_H + 2, 2, tier_col[t]);
+            draw_capsule(th, cx, WB_Y, cx, WB_Y + WB_H - 1, 1, tier_hi[t]);
             rb->lcd_set_drawmode(DRMODE_SOLID);
             rb->lcd_set_foreground(LCD_RGBPACK(255,255,255));
             rb->lcd_drawpixel(cx + 2, WB_Y - 5);
             rb->lcd_drawpixel(cx + 1, WB_Y - 6);
             rb->lcd_drawpixel(cx + 3, WB_Y - 6);
             rb->lcd_drawpixel(cx + 2, WB_Y - 7);
+            if (t >= 3) {
+                rb->lcd_drawpixel(cx - 2, WB_Y + WB_H + 3);
+                rb->lcd_drawpixel(cx - 3, WB_Y + WB_H + 4);
+                rb->lcd_drawpixel(cx - 1, WB_Y + WB_H + 4);
+                rb->lcd_drawpixel(cx - 2, WB_Y + WB_H + 5);
+            }
         } else if (week_secs[i] >= SUPER_WEEK_SECS) {
             int cx = x + WB_SEGW/2;
             draw_capsule(th, cx, WB_Y - 2, cx, WB_Y + WB_H + 1, 2, COL_GOLD);
@@ -2042,13 +2202,12 @@ static int draw_week_card(int wi, int dir)
     const struct theme *th = &themes[CARD_YEAR];
     struct week_info w;
     week_scan(wi, &w);
-    bool super = week_secs[wi] >= SUPER_WEEK_SECS;
-    bool ultra = week_secs[wi] >= ULTRA_WEEK_SECS;
+    int tier = week_tier(week_secs[wi]);
     char buf2[80], rng[40];
 
     fill_gradient(th);
     rb->snprintf(buf2, sizeof buf2, "WEEK %d", wi + 1);
-    kicker(22, buf2, ultra ? COL_ICE : super ? COL_GOLD : th->accent);
+    kicker(22, buf2, tier ? tier_col[tier] : th->accent);
     accent_underline(th, 43);
     week_range(wi, rng, sizeof rng);
     center_text(50, rng, COL_TEXT_DIM);
@@ -2073,18 +2232,22 @@ static int draw_week_card(int wi, int dir)
     rb->snprintf(buf2, sizeof buf2, "%ld plays  -  %ld skips", w.plays, w.skips);
     center_text(194, buf2, COL_TEXT_DIM);
 
-    if (ultra)
-        center_text(216, "ULTRAWEEK - it never left your hands", COL_ICE);
-    else if (super)
-        center_text(216, "SUPERWEEK - a full day of music", COL_GOLD);
-    else
+    if (tier) {
+        static const char * const tag[] = { NULL,
+            "SUPERWEEK - a full day of music",
+            "ULTRAWEEK - it never left your hands",
+            "HYPERWEEK - it plays in your sleep",
+            "GIGAWEEK - when did it even charge?",
+            "OMEGAWEEK - silence is a myth" };
+        center_text(216, tag[tier], tier_col[tier]);
+    } else
         center_text(216, "spin for other weeks - MENU: back", COL_TEXT_DIM);
 
     present_card(dir);
     return animate_count(th, SCREEN_W/2, hero_band_y, cw, ch, sw, w.mins);
 }
 
-static int draw_card(int idx, int dir)
+static int draw_card_body(int idx, int dir)
 {
     const struct theme *th = &themes[idx];
     char buf[40], buf2[64];
@@ -2562,6 +2725,20 @@ static int draw_card(int idx, int dir)
     return ret;
 }
 
+/* boosted shell: a full card is gradient fills and blends edge to edge,
+ * which the PP targets cannot animate at their idle clock */
+static int draw_card(int idx, int dir)
+{
+#ifdef HAVE_ADJUSTABLE_CPU_FREQ
+    rb->cpu_boost(true);
+#endif
+    int ret = draw_card_body(idx, dir);
+#ifdef HAVE_ADJUSTABLE_CPU_FREQ
+    rb->cpu_boost(false);
+#endif
+    return ret;
+}
+
 /* interactive week browser on the year card: wheel moves the cursor over
  * the week bar, SELECT opens that week's recap (wheel there flips to
  * adjacent weeks), MENU backs out. Returns SYS_USB_CONNECTED or 0. */
@@ -2581,12 +2758,13 @@ static int week_browse(void)
         rb->snprintf(buf2, sizeof buf2, "week %d: %s", cursor + 1, rng);
         center_text(184, buf2, COL_TEXT_LIGHT);
         long m = week_secs[cursor] / 60;
-        if (week_secs[cursor] >= ULTRA_WEEK_SECS) {
-            rb->snprintf(buf2, sizeof buf2, "%ld min - ULTRAWEEK ?!", m);
-            center_text(202, buf2, COL_ICE);
-        } else if (week_secs[cursor] >= SUPER_WEEK_SECS) {
-            rb->snprintf(buf2, sizeof buf2, "%ld min - SUPERWEEK", m);
-            center_text(202, buf2, COL_GOLD);
+        int wt = week_tier(week_secs[cursor]);
+        if (wt) {
+            static const char * const nm[] = { NULL, "SUPERWEEK",
+                "ULTRAWEEK ?!", "HYPERWEEK ?!?", "GIGAWEEK ?!?!",
+                "OMEGAWEEK ?!?!?" };
+            rb->snprintf(buf2, sizeof buf2, "%ld min - %s", m, nm[wt]);
+            center_text(202, buf2, tier_col[wt]);
         } else {
             rb->snprintf(buf2, sizeof buf2, "%ld min", m);
             center_text(202, buf2, COL_TEXT_DIM);
@@ -2606,7 +2784,14 @@ static int week_browse(void)
         } else if (base == BUTTON_SELECT) {
             int dir = 0;
             for (;;) {
-                int b = draw_week_card(cursor, dir);
+                int b;
+#ifdef HAVE_ADJUSTABLE_CPU_FREQ
+                rb->cpu_boost(true);   /* week_scan re-reads the log */
+#endif
+                b = draw_week_card(cursor, dir);
+#ifdef HAVE_ADJUSTABLE_CPU_FREQ
+                rb->cpu_boost(false);
+#endif
                 if (!b) b = rb->button_get(true);
                 if (b == SYS_USB_CONNECTED)
                     return b;
@@ -2656,6 +2841,10 @@ static bool wrapped_load_data(bool ask_year)
     /* grab the plugin buffer for aggregation */
     abuf = rb->plugin_get_buffer(&abuf_sz);
     abuf_used = 0;
+
+#ifdef HAVE_ADJUSTABLE_CPU_FREQ
+    rb->cpu_boost(true);   /* dbmap + year pre-scan read the whole family */
+#endif
 
     /* the database map claims the bottom of the buffer and survives
      * every reload; the aggregate tables live above the floor */
@@ -2735,6 +2924,9 @@ static bool wrapped_load_data(bool ask_year)
         }
     }
 
+#ifdef HAVE_ADJUSTABLE_CPU_FREQ
+    rb->cpu_boost(false);          /* wrapped_reload holds its own boost */
+#endif
     return wrapped_reload();
 }
 
@@ -2742,7 +2934,7 @@ static bool wrapped_load_data(bool ask_year)
  * rebuild the tables from the bump buffer and parse. Split out so the
  * achievements browser can swap to an all-time crunch and back without
  * re-running the year picker. */
-static bool wrapped_reload(void)
+static bool wrapped_reload_once(void)
 {
     abuf_used = abuf_floor;      /* keep the dbmap, rebuild everything above */
 
@@ -2815,12 +3007,30 @@ static bool wrapped_reload(void)
     return true;
 }
 
+static bool wrapped_reload(void)
+{
+#ifdef HAVE_ADJUSTABLE_CPU_FREQ
+    rb->cpu_boost(true);           /* the crunch is the hot path on PP */
+#endif
+    bool ok = wrapped_reload_once();
+    /* the verdict went guilty->innocent on a settled retry, so the parse
+     * raced the disk and the aggregates came from those same racy reads:
+     * crunch once more now that the family reads whole */
+    if (cheat_healed)
+        ok = wrapped_reload_once();
+#ifdef HAVE_ADJUSTABLE_CPU_FREQ
+    rb->cpu_boost(false);
+#endif
+    return ok;
+}
+
 /* returns PLUGIN_OK normally, PLUGIN_USB_CONNECTED if unplugged mid-view */
 static int wrapped_show(void)
 {
     wrapped_font_init();
     if (!wrapped_load_data(true))
         return PLUGIN_OK;
+    hide_load();
 
     /* card loop */
     int card = 0;
@@ -2836,8 +3046,43 @@ static int wrapped_show(void)
         }
         /* continuous wheel rotation posts repeat-flagged events */
         int base = btn & ~BUTTON_REPEAT;
+
+        /* hold SELECT: hide the current card - or, on the intro, bring
+         * every hidden card back. Checked before anything else so the
+         * repeat flag isn't mistaken for wheel motion. */
+        if (base == BUTTON_SELECT && (btn & BUTTON_REPEAT)) {
+            if (card == CARD_INTRO && hide_mask) {
+                hide_mask = 0;
+                hide_save();
+                rb->splash(HZ, "All cards are back");
+                rb->button_clear_queue();
+                btn = draw_card(card, 0);
+                continue;
+            }
+            if (card_hideable(card)) {
+                static const char *hl[] = { "Hide this card from the deck?" };
+                const struct text_message hm = { hl, 1 };
+                if (rb->gui_syncyesno_run(&hm, NULL, NULL) == YESNO_YES) {
+                    hide_mask |= (uint32_t)1 << card;
+                    hide_save();
+                    rb->splash(HZ * 3/2,
+                               "Hidden - hold SELECT on the intro to undo");
+                    int nx = card + 1;
+                    while (nx < N_CARDS && card_hidden(nx)) nx++;
+                    card = (nx < N_CARDS) ? nx : CARD_OUTRO;
+                }
+                rb->button_clear_queue();
+                btn = draw_card(card, 0);
+                continue;
+            }
+            btn = 0;
+            continue;
+        }
+
         if (base == BUTTON_SCROLL_FWD || base == BUTTON_RIGHT) {
-            if (card < N_CARDS - 1) { card++; btn = draw_card(card, +1); continue; }
+            int nx = card + 1;
+            while (nx < N_CARDS && card_hidden(nx)) nx++;
+            if (nx < N_CARDS) { card = nx; btn = draw_card(card, +1); continue; }
 #ifdef WRAPPED_WITH_ACH
         } else if (base == BUTTON_SELECT && card == CARD_ACH) {
             /* the achievements card is interactive: SELECT browses badges */
@@ -2845,6 +3090,8 @@ static int wrapped_show(void)
                 rb->lcd_setfont(FONT_SYSFIXED);
                 return PLUGIN_USB_CONNECTED;
             }
+            if (ach_reset_ran)     /* "start over": this deck describes */
+                break;             /* data that no longer exists        */
             btn = draw_card(card, 0);
             continue;
 #endif
@@ -2859,7 +3106,9 @@ static int wrapped_show(void)
             btn = draw_card(card, 0);
             continue;
         } else if (base == BUTTON_SCROLL_BACK || base == BUTTON_LEFT) {
-            if (card > 0) { card--; btn = draw_card(card, -1); continue; }
+            int nx = card - 1;
+            while (nx > 0 && card_hidden(nx)) nx--;
+            if (nx >= 0) { card = nx; btn = draw_card(card, -1); continue; }
         } else if (base == BUTTON_PLAY) {
             save_card();
             btn = draw_card(card, 0);
@@ -2869,7 +3118,9 @@ static int wrapped_show(void)
             export_deck();
             btn = draw_card(card, 0);
             continue;
-        } else if (base == BUTTON_MENU || base == BUTTON_SELECT) {
+        } else if (base == BUTTON_MENU) {
+            /* MENU alone exits now: a plain SELECT must stay quiet so
+             * holding it (hide gesture) doesn't fall out of the deck */
             break;
         }
         btn = 0;

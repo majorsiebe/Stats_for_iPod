@@ -57,6 +57,14 @@
 #define CHEAT_F_SIG_SEEN 0x1   /* a valid sig existed; its absence = cheat */
 #define CHEAT_F_CHEATED  0x2   /* tampering was detected at least once     */
 
+/* "start over" handshake: the achievements plugin deletes the whole log
+ * family plus verdict/badge files and drops this flag. The core's signing
+ * chain in RAM outlives that deletion, so pbl_sig_init consumes the flag
+ * at the next boot and re-blesses whatever is on disk as a clean fresh
+ * start (no taint). While the flag exists verifiers pass no verdict -
+ * the disk is mid-reset, not mid-tamper. */
+#define SPUN_RESET_FLAG  "/.rockbox/spun_reset"
+
 struct pbl_sig {
     uint32_t magic;
     uint32_t flags;

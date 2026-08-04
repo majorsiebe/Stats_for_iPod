@@ -124,7 +124,8 @@ static void flush_toasts(void)
         pend_toast[i >> 3] &= ~(1u << (i & 7));
         pend_toast_n--;
         if (shown < 3) {
-            ach_toast(ach_table[i].name, ach_is_green(i),
+            ach_toast(ach_table[i].name,
+                      ach_is_green(i) ? -1 : ach_tier(i),
                       "ACHIEVEMENT UNLOCKED");
             shown++;
         } else {
@@ -134,7 +135,7 @@ static void flush_toasts(void)
     if (extra) {
         char b[32];
         rb->snprintf(b, sizeof b, "...and %d more!", extra);
-        ach_toast(b, false, "ACHIEVEMENT UNLOCKED");
+        ach_toast(b, TIER_GOLD, "ACHIEVEMENT UNLOCKED");
     }
 }
 
@@ -158,14 +159,14 @@ static void milestone_check(long prev_plays, long prev_mins)
         if (prev_plays < play_stones[i] && total_plays >= play_stones[i]) {
             commafmt(play_stones[i], nb, sizeof nb);
             rb->snprintf(b, sizeof b, "Play #%s", nb);
-            ach_toast(b, false, "MILESTONE");
+            ach_toast(b, TIER_GOLD, "MILESTONE");
             break;
         }
     for (unsigned i = 0; i < sizeof(min_stones)/sizeof(min_stones[0]); i++)
         if (prev_mins < min_stones[i] && mins >= min_stones[i]) {
             commafmt(min_stones[i], nb, sizeof nb);
             rb->snprintf(b, sizeof b, "Minute %s", nb);
-            ach_toast(b, false, "MILESTONE");
+            ach_toast(b, TIER_GOLD, "MILESTONE");
             break;
         }
 }
@@ -199,6 +200,8 @@ static void process_track(const struct pend *t)
                                      || (t->el_ms >= 240000UL);
     bool valid_ts = (t->ts >= MIN_VALID_TS);
     long prev_plays = total_plays, prev_mins = total_seconds / 60;
+    long wk = valid_ts ? ((long)(t->ts / 86400UL) - 4) / 7 : 0;
+    unsigned wk_before = valid_ts ? at_week_secs_of(wk) : 0;
 
     if (listened) {
         total_plays++;
@@ -220,6 +223,21 @@ static void process_track(const struct pend *t)
         if (valid_ts)
             tally_time(t->ts, elapsed);
         ach_tally(t->ts, valid_ts, true, elapsed, artist, title);
+
+        /* live week-tier crossings: the badges are one-time, but the
+         * week ladder celebrates every week you climb it. Baseline is
+         * the boot rebase, so a crossing can only fire live; a covered
+         * hold switch lets the moment pass, same as milestones. */
+        if (valid_ts && !rb->button_hold()) {
+            int t1 = week_tier(at_week_secs_of(wk));
+            int t0 = week_tier(wk_before);
+            if (t1 > t0) {
+                static const char *wt_name[] = {
+                    "", "SUPERWEEK", "ULTRAWEEK", "HYPERWEEK",
+                    "GIGAWEEK", "OMEGAWEEK" };
+                ach_toast(wt_name[t1], t1 - 1, "THIS WEEK");
+            }
+        }
     } else if (t->el_ms >= 5000) {
         total_skips++;
         struct agg *a = htable_get(&t_track, title);
@@ -348,7 +366,8 @@ static int exit_tsr(bool reenter)
 
     /* the user launched us again: small control menu */
     MENUITEM_STRINGLIST(menu, "Achievement watcher", NULL,
-                        "Send test toast (5 s)", "Turn off", "Keep running");
+                        "Send test toast (5 s)", "Turn off",
+                        "Delete Spun backups", "Keep running");
     switch (rb->do_menu(&menu, NULL, NULL, false)) {
     case 0:
         rb->queue_post(&gThread.queue, EV_TEST, *rb->current_tick);
@@ -360,6 +379,24 @@ static int exit_tsr(bool reenter)
         if (fd >= 0) { rb->write(fd, "1", 1); rb->close(fd); }
         rb->splash(HZ, "Watcher off (start it to re-enable)");
         return PLUGIN_TSR_TERMINATE;
+    }
+    case 2: {
+        /* the real delete behind the soft one in the Spun menus */
+        static const char *lines[] = {
+            "Delete the .bak backups?",
+            "This one is for real -",
+            "no way back afterwards.",
+        };
+        const struct text_message msg = { lines, 3 };
+        if (rb->gui_syncyesno_run(&msg, NULL, NULL) == YESNO_YES) {
+            int n = spun_purge_backups();
+            if (n > 0)
+                rb->splashf(HZ * 2, "%d backup file%s deleted",
+                            n, n == 1 ? "" : "s");
+            else
+                rb->splash(HZ * 2, "No backups to delete");
+        }
+        return PLUGIN_TSR_CONTINUE;
     }
     default:
         return PLUGIN_TSR_CONTINUE;

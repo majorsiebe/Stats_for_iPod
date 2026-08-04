@@ -1,8 +1,8 @@
 diff --git a/apps/playback.c b/apps/playback.c
-index 8102f8d917..20596b4092 100644
+index 8102f8d917..75b7c924df 100644
 --- a/apps/playback.c
 +++ b/apps/playback.c
-@@ -365,6 +365,168 @@ static unsigned int position_key = 0;
+@@ -365,6 +365,180 @@ static unsigned int position_key = 0;
  static int playback_log_handle = 0; /* core_alloc handle for playback log buffer */
  #endif
  
@@ -103,6 +103,18 @@ index 8102f8d917..20596b4092 100644
 +        return;
 +    pbl_sig_ready = true;
 +
++    /* a pending "start over": the plugin wiped the family while a previous
++     * boot's chain state still described the old bytes. Adopt whatever is
++     * on disk as a clean fresh start and consume the flag. */
++    if (remove(SPUN_RESET_FLAG) == 0) {
++        pbl_sig.magic  = PBL_SIG_MAGIC;
++        pbl_sig.flags  = 0;
++        pbl_sig.hash   = PBL_HASH_BASIS;
++        pbl_sig.nbytes = pbl_family_hash(0, UINT64_MAX, &pbl_sig.hash);
++        pbl_sig_store();
++        return;
++    }
++
 +    int fd = open(PBL_SIG_PATH, O_RDONLY);
 +    bool have = false;
 +    if (fd >= 0) {
@@ -171,7 +183,7 @@ index 8102f8d917..20596b4092 100644
  /* Forward declarations */
  enum audio_start_playback_flags
  {
-@@ -1281,12 +1443,24 @@ void allocate_playback_log(void)
+@@ -1281,12 +1455,24 @@ void allocate_playback_log(void)
              }
              else
              {
@@ -198,7 +210,7 @@ index 8102f8d917..20596b4092 100644
              }
              close(fd);
          }
-@@ -1354,12 +1528,16 @@ void add_playbacklog(struct mp3entry *id3)
+@@ -1354,12 +1540,16 @@ void add_playbacklog(struct mp3entry *id3)
          {
              return; /* failure */
          }
@@ -216,7 +228,7 @@ index 8102f8d917..20596b4092 100644
              buf[0] = '\0';
              core_put_data_pinned(buf);
          }
-@@ -1367,10 +1545,16 @@ void add_playbacklog(struct mp3entry *id3)
+@@ -1367,10 +1557,16 @@ void add_playbacklog(struct mp3entry *id3)
          if (id3)
          {
              /* we have the timestamp from when we tried to add to buffer */
@@ -591,6 +603,33 @@ index 35cd63d5fb..35794cb3e2 100644
      while (true)
      {
          switch (next_screen)
+diff --git a/firmware/target/arm/ipod/video/lcd-video.c b/firmware/target/arm/ipod/video/lcd-video.c
+index 27d889aafa..cc7e6539f4 100644
+--- a/firmware/target/arm/ipod/video/lcd-video.c
++++ b/firmware/target/arm/ipod/video/lcd-video.c
+@@ -394,6 +394,22 @@ void lcd_update_rect(int x, int y, int width, int height)
+         return;
+ #endif
+ 
++#ifndef BOOTLOADER
++    /* custom addition (this build): while an achievement toast is up, only
++     * the thread that froze the display may push to the BCM; the freeze
++     * self-expires so it can never wedge the UI (state lives in plugin.c) */
++    {
++        extern volatile unsigned int lcd_freeze_thread;
++        extern volatile long lcd_freeze_tick;
++        if (lcd_freeze_thread) {
++            if (TIME_AFTER(current_tick, lcd_freeze_tick + 5 * HZ))
++                lcd_freeze_thread = 0;
++            else if (thread_self() != lcd_freeze_thread)
++                return;
++        }
++    }
++#endif
++
+     if (x + width >= LCD_WIDTH)
+         width = LCD_WIDTH - x;
+     if (y + height >= LCD_HEIGHT)
 diff --git a/firmware/target/arm/s5l8702/lcd-s5l8702.c b/firmware/target/arm/s5l8702/lcd-s5l8702.c
 index cc0fa37605..d4823cae15 100644
 --- a/firmware/target/arm/s5l8702/lcd-s5l8702.c
@@ -618,30 +657,3 @@ index cc0fa37605..d4823cae15 100644
      /* FIXME: ISR()->panicf()->lcd_update() blocks forever */
      mutex_lock(&lcd_mutex);
      if (lcd_ispowered)
-diff --git a/firmware/target/arm/ipod/video/lcd-video.c b/firmware/target/arm/ipod/video/lcd-video.c
-index 27d889aafa..cc7e6539f4 100644
---- a/firmware/target/arm/ipod/video/lcd-video.c
-+++ b/firmware/target/arm/ipod/video/lcd-video.c
-@@ -394,6 +394,22 @@ void lcd_update_rect(int x, int y, int width, int height)
-         return;
- #endif
-
-+#ifndef BOOTLOADER
-+    /* custom addition (this build): while an achievement toast is up, only
-+     * the thread that froze the display may push to the BCM; the freeze
-+     * self-expires so it can never wedge the UI (state lives in plugin.c) */
-+    {
-+        extern volatile unsigned int lcd_freeze_thread;
-+        extern volatile long lcd_freeze_tick;
-+        if (lcd_freeze_thread) {
-+            if (TIME_AFTER(current_tick, lcd_freeze_tick + 5 * HZ))
-+                lcd_freeze_thread = 0;
-+            else if (thread_self() != lcd_freeze_thread)
-+                return;
-+        }
-+    }
-+#endif
-+
-     if (x + width >= LCD_WIDTH)
-         width = LCD_WIDTH - x;
-     if (y + height >= LCD_HEIGHT)
