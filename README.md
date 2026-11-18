@@ -68,7 +68,7 @@ As of writing this, the deck includes:
 The year overview shows the current year, broken up into calendar weeks. Pressing SELECT highlights the year bar and allows you to scroll between weeks.
 
 - Weeks without activity show up as light grey; weeks yet to come are a transparent grey.
-- Weeks with activity are green, gold or blue, corresponding to a normal week, a **SUPERWEEK**,an **ULTRAWEEK**, a **HYPERWEEK**, a **GIGAWEEK**, and finally an **OMEGAWEEK**.
+- Weeks with activity are coloured, corresponding to a normal week, a **SUPERWEEK**, an **ULTRAWEEK**, a **HYPERWEEK**, a **GIGAWEEK**, and finally an **OMEGAWEEK**.
 
 | Week type | Listening time | Colour |
 |---|---|---|
@@ -82,7 +82,7 @@ The year overview shows the current year, broken up into calendar weeks. Pressin
 
 
 
-When a week is highlighted, hitting SELECT again opens a card showing that week in more detail: a small time-played counter (similar to the Minutes Listened card), top artist, top song, and total plays and skips. If the week is a SUPERWEEK or ULTRAWEEK, the card is highlighted in gold or blue. Pressing MENU goes back to the year overview; if the bar is still selected, pressing MENU again returns to scrolling between cards.
+When a week is highlighted, hitting SELECT again opens a card showing that week in more detail: a small time-played counter (similar to the Minutes Listened card), top artist, top song, and total plays and skips. If the week is a **SUPERWEEK**,an **ULTRAWEEK**, a **HYPERWEEK**, a **GIGAWEEK**, or an **OMEGAWEEK**., the card is highlighted. Pressing MENU goes back to the year overview; if the bar is still selected, pressing MENU again returns to scrolling between cards.
 
 ### Listening Type
 
@@ -129,16 +129,16 @@ Letter key: **R**oamer, **D**evotee, **E**xplorer, **F** = repeater, **S**ampler
 
 This is one I believe Spotify does not have! My inspiration comes from the popular browser game Cookie Clicker, known for its impossible achievements. As of writing this (July 22nd, 2026) there are 345 to collect, ranging from very simple (1 minute listened) to downright impossible. I won't spoil them here, but the [complete list](ACHIEVEMENTS.md) is available if you are curious.
 
-> **NOTE:** it will know if you tamper with it, and it will call you out. you have been warned.
+> **NOTE:** it will know if you tamper with it, and it will call you out. you have been warned. (this sometimes gives false positives. with 1.3 there's a couple improvements to this, and your log gets checked for false positives automatically on first start.) 
 
 To access the Achievements menu, simply **SELECT** its card and the whole list will appear. NEW achievements are highlighted in gold. Secret achievements are usually harder to complete or correspond to a certain action. They stay hidden until unlocked. If you go the tampering route, cheated achievements will show up as green. To get back to the cards, press MENU.
 
-The Achievements card is part of its own plugin set and can technically be disabled if you wish. It includes toasts, similar to what unlocking an achievement on Steam shows. If that doesn't ring any bells, just try it. The rest of the screen freezes for the duration of the toast (2 seconds), and if an achievement triggers while on HOLD, it only shows up once the iPod is taken OFF HOLD. Toast functionality can be tested with **achwatch** in the plugins menu; the achievement watcher can also be turned OFF there.
+The Achievements card is part of its own plugin set and can technically be disabled if you wish. It includes toasts, similar to what unlocking an achievement on Steam shows. If that doesn't ring any bells, just try it. The rest of the screen freezes for the duration of the toast (2 seconds), and if an achievement triggers while on HOLD, it only shows up once the iPod is taken OFF HOLD. Toast functionality can be tested in settings; the achievement watcher can also be turned OFF there, if you so please.
 
 ## Controls & good-to-knows
 
 - To select, press **SELECT** (middle button). To exit or go back, press **MENU**.
-- **This plugin has a screenshot feature!** Holding **PLAY/PAUSE** saves a bitmap of the selected card to your device root, named `dump [DATE]-[TIME].bmp`. A feature for saving *all* cards (useful for sharing) lives on the last card. press SELECT there to trigger it. Note that this takes a while and cycles through all cards automatically, and on the iPod Video, "a while" means *minutes* (see the port notes).
+- **This plugin has a screenshot feature!** Holding **PLAY/PAUSE** saves a bitmap of the selected card to your device root, named `dump [DATE]-[TIME].bmp`. A feature for saving *all* cards (useful for sharing) exists in the new settings page. Note that this takes a while and cycles through all cards automatically, and on the iPod Video, "a while" means *minutes* (see the port notes).
 - Because of the way Rockbox handles logging, forcing a reset (holding MENU + SELECT for 6 seconds) WILL result in log data not saving. Always shut the device down properly (hold PLAY/PAUSE until "Shutting Down" appears) so you don't miss any log entries.
 - Enabling the Rockbox Database gives more accurate artist/song names!
 - The plugin works best when you don't mess with playback constantly. In my experience, lots of skips, constant pausing, or shutting down randomly can result in an inaccurate log.
@@ -180,7 +180,7 @@ WARNING: updating Rockbox the official way (Rockbox Utility or an official build
 
 Spun needs accurate dates to work well. If you don't use the clock on your device, you should set it. If you do, you should check if it's accurate. The plugin ignores data from before 2005. If your plays are not showing up, this is the most likely issue. If your iPod dies fully or you unplug the battery, the RTC will lose its data and you will need to set it again.
 
-Two things to keep in mind: always shut down properly (hold PLAY/PAUSE), as a forced reset can (read: will) cause the last few plays to be lost. 
+Always shut down properly (hold PLAY/PAUSE), as a forced reset can (read: will) cause the last few plays to be lost. 
 
 ## Building from source
 
