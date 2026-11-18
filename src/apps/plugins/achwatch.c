@@ -409,6 +409,7 @@ enum plugin_status plugin_start(const void *parameter)
     bool autoboot = (parameter != NULL && !resumed);  /* root menu boot hook */
     (void)wrapped_show;           /* header carries all of Wrapped;  */
     (void)ach_show;               /* only engine + parser used here  */
+    wrapped_quiet = true;         /* background re-reads never splash */
 
     if (!resumed && !autoboot)
         rb->remove(ACHWATCH_OFF_FLAG);   /* manual start = re-enable boot */
@@ -428,7 +429,10 @@ enum plugin_status plugin_start(const void *parameter)
     armed = true;
     rb->plugin_tsr(exit_tsr);
 
-    if (!resumed && !autoboot)    /* silent when auto-started or resumed */
+    if (!resumed && !autoboot) {  /* silent when auto-started or resumed */
+        rb->lcd_clear_display();  /* not on top of the Loading splash */
+        rb->lcd_update();
         rb->splash(HZ, "Achievement watcher on");
+    }
     return PLUGIN_OK;
 }

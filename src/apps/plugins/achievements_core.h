@@ -156,8 +156,75 @@ static int at_week_n;
 static struct { unsigned hash; int n; } at_daytrk[AT_DAYTRK];
 static int at_daytrk_n;
 
+/* ---- earn-date backfill ----
+ * When each badge's counter really passed its threshold, as the log tells
+ * it: stamped during all-time crunches only (a year-scoped crunch passes
+ * thresholds late). bf_next holds each metric's lowest threshold still
+ * unpassed, so a line costs one compare per counter until something
+ * actually crosses. */
+static uint32_t bf_when[sizeof(ach_table)/sizeof(ach_table[0])];
+static long     bf_next[AM_COUNT];
+static long     bf_trk_max, bf_skip_max, bf_wk_max, bf_day_max;
+static long     bf_sup, bf_ult, bf_act;
+static bool     bf_ready;   /* only after bf_reset (at_reset): zeroed
+                             * bf_next would make every line a full scan */
+
+static bool bf_metric(int m)
+{
+    switch (m) {
+    case AM_MINUTES: case AM_PLAYS: case AM_SKIPS:
+    case AM_UNIQ_TRACKS: case AM_UNIQ_ARTISTS: case AM_UNIQ_ALBUMS:
+    case AM_NIGHT_PLAYS: case AM_HOURS_COVERED: case AM_ACTIVE_DAYS:
+    case AM_TRACK_PLAYS: case AM_ARTIST_PLAYS: case AM_TRACK_SKIPS:
+    case AM_DAY_PLAYS:
+    case AM_DAY_MINS: case AM_TRACK_DAY: case AM_SKIP_RUN: case AM_PLAY_RUN:
+    case AM_WEEK_MINS: case AM_SUPERWEEKS: case AM_ULTRAWEEKS:
+    case AM_ACTIVE_WEEKS:
+    case AM_F_NEWYEAR: case AM_F_XMAS: case AM_F_HALLOWEEN:
+    case AM_F_FRIDAY13: case AM_F_MIDNIGHT: case AM_F_LEAPDAY:
+        return true;
+    default:
+        return m >= AM_TYPE0 && m < AM_TYPE0 + 16;
+    }
+}
+
+static void bf_reset(void)
+{
+    rb->memset(bf_when, 0, sizeof(bf_when));
+    for (int m = 0; m < AM_COUNT; m++)
+        bf_next[m] = 0x7fffffffL;
+    for (int i = 0; i < N_ACH; i++) {
+        int m = ach_table[i].metric;
+        if (bf_metric(m) && ach_table[i].threshold < bf_next[m])
+            bf_next[m] = ach_table[i].threshold;
+    }
+    bf_trk_max = bf_skip_max = bf_wk_max = bf_day_max = 0;
+    bf_sup = bf_ult = bf_act = 0;
+    bf_ready = true;
+}
+
+static void bf_cross(int m, long v, unsigned long ts)
+{
+    if (!bf_ready || v < bf_next[m])
+        return;
+    long nxt = 0x7fffffffL;
+    for (int i = 0; i < N_ACH; i++) {
+        if (ach_table[i].metric != m)
+            continue;
+        long thr = ach_table[i].threshold;
+        if (thr <= v) {
+            if (!bf_when[i])
+                bf_when[i] = (uint32_t)ts;
+        } else if (thr < nxt) {
+            nxt = thr;
+        }
+    }
+    bf_next[m] = nxt;
+}
+
 static void at_reset(void)
 {
+    bf_reset();
     rb->memset(am_val, 0, sizeof(am_val));
     at_cur_day = -1;
     at_day_secs = at_day_secs_max = 0;
@@ -230,6 +297,26 @@ static void ach_tally(unsigned long ts, bool valid_ts, bool listened,
         at_skips++;
     }
 
+    bool bf_on = valid_ts && filter_year == 0;
+    if (bf_on) {
+        bf_cross(AM_MINUTES, total_seconds / 60, ts);
+        bf_cross(AM_PLAYS, total_plays, ts);
+        bf_cross(AM_SKIPS, total_skips, ts);
+        bf_cross(AM_UNIQ_TRACKS, at_uniq, ts);
+        bf_cross(AM_UNIQ_ARTISTS, t_artist.n, ts);
+        bf_cross(AM_UNIQ_ALBUMS, t_album.n, ts);
+        bf_cross(AM_SKIP_RUN, at_skip_run_max, ts);
+        bf_cross(AM_PLAY_RUN, at_play_run_max, ts);
+        for (int m = AM_TYPE0; m < AM_TYPE0 + 16; m++)
+            bf_cross(m, am_val[m], ts);
+        if (!listened) {
+            struct agg *sk = htable_get(&t_track, title);
+            if (sk && sk->skips > bf_skip_max)
+                bf_skip_max = sk->skips;
+            bf_cross(AM_TRACK_SKIPS, bf_skip_max, ts);
+        }
+    }
+
     if (!valid_ts || !listened)
         return;
 
@@ -257,6 +344,18 @@ static void ach_tally(unsigned long ts, bool valid_ts, bool listened,
     }
 
     at_week_add((day - 4) / 7, secs);   /* unix day 4 = Mon 1970-01-05 */
+    if (bf_on) {
+        unsigned after = at_week_secs_of((day - 4) / 7);
+        unsigned before = after - secs;
+        if (before < (unsigned)SUPER_WEEK_SECS && after >= (unsigned)SUPER_WEEK_SECS)
+            bf_sup++;
+        if (before < (unsigned)ULTRA_WEEK_SECS && after >= (unsigned)ULTRA_WEEK_SECS)
+            bf_ult++;
+        if (before < (unsigned)WEEK_ACTIVE_SECS && after >= (unsigned)WEEK_ACTIVE_SECS)
+            bf_act++;
+        if ((long)(after / 60) > bf_wk_max)
+            bf_wk_max = after / 60;
+    }
 
     /* date/time flags */
     int y, m, d;
@@ -268,6 +367,35 @@ static void ach_tally(unsigned long ts, bool valid_ts, bool listened,
     if (m ==  2 && d == 29)               am_val[AM_F_LEAPDAY]   = 1;
     if (d == 13 && (day % 7) == 1)        am_val[AM_F_FRIDAY13]  = 1;  /* day%7: 0=Thu */
     if (tod < 60)                         am_val[AM_F_MIDNIGHT]  = 1;
+
+    if (bf_on) {
+        long hcov = 0;
+        for (int hh = 0; hh < 24; hh++)
+            if (hour_hist[hh] > 0) hcov++;
+        struct agg *pt = htable_get(&t_track, title);
+        if (pt && pt->count > bf_trk_max)
+            bf_trk_max = pt->count;
+        bf_cross(AM_NIGHT_PLAYS, at_night, ts);
+        bf_cross(AM_HOURS_COVERED, hcov, ts);
+        bf_cross(AM_ACTIVE_DAYS, day_n, ts);
+        bf_cross(AM_TRACK_PLAYS, bf_trk_max, ts);
+        bf_cross(AM_ARTIST_PLAYS, at_top_art, ts);
+        for (int k = day_n - 1; k >= 0; k--)     /* tail-first, like day_add */
+            if (days[k].day == day) {
+                if (days[k].count > bf_day_max)
+                    bf_day_max = days[k].count;
+                break;
+            }
+        bf_cross(AM_DAY_PLAYS, bf_day_max, ts);
+        bf_cross(AM_DAY_MINS, at_day_secs_max / 60, ts);
+        bf_cross(AM_TRACK_DAY, at_trackday_max, ts);
+        bf_cross(AM_WEEK_MINS, bf_wk_max, ts);
+        bf_cross(AM_SUPERWEEKS, bf_sup, ts);
+        bf_cross(AM_ULTRAWEEKS, bf_ult, ts);
+        bf_cross(AM_ACTIVE_WEEKS, bf_act, ts);
+        for (int m = AM_F_NEWYEAR; m <= AM_F_LEAPDAY; m++)
+            bf_cross(m, am_val[m], ts);
+    }
 }
 
 /* ---- turn aggregates + tallies into the final metric values ---- */
@@ -616,7 +744,11 @@ static bool ach_record_unlocks(void)
     for (int i = 0; i < N_ACH; i++) {
         if (!ach_unlocked(i))
             continue;
-        if (ach_when[i] == 0) {
+        if (bf_when[i] && (ach_when[i] == 0 || ach_when[i] == 1
+                           || bf_when[i] < ach_when[i])) {
+            ach_when[i] = bf_when[i];       /* when the log says it happened */
+            changed = true;
+        } else if (ach_when[i] == 0) {
             if (ach_when_legacy) {
                 ach_when[i] = 1;             /* before records began */
             } else {
@@ -1056,34 +1188,6 @@ static void ach_draw_screen(int cursor, int top, int done, int newn)
 #endif
 }
 
-/* not everything past the end of the list is empty. returns the button
- * that dismissed it so USB unplug still propagates */
-static int ach_egg(void)
-{
-    const struct theme *th = &ach_th;
-    int cx = SCREEN_W / 2;
-    fill_gradient(th);
-    draw_capsule(th, cx, 74, cx, 128, 15, COL_ICE);
-    draw_capsule(th, cx, 82, cx, 120, 8, COL_ICE_HI);
-    rb->lcd_set_drawmode(DRMODE_SOLID);
-    rb->lcd_set_foreground(LCD_RGBPACK(255,255,255));
-    rb->lcd_drawpixel(cx + 22, 66);
-    rb->lcd_drawpixel(cx + 21, 67);
-    rb->lcd_drawpixel(cx + 23, 67);
-    rb->lcd_drawpixel(cx + 22, 68);
-    rb->lcd_drawpixel(cx - 26, 132);
-    rb->lcd_drawpixel(cx - 27, 133);
-    rb->lcd_drawpixel(cx - 25, 133);
-    rb->lcd_drawpixel(cx - 26, 134);
-    kicker(30, "OK, ONE MORE", COL_ICE);
-    center_text(154, "no badge for this one -", COL_TEXT_LIGHT);
-    center_text(172, "you just wanted to see past the end.", COL_TEXT_DIM);
-    center_text(202, "tell Tup the iPod says hi", COL_ICE);
-    rb->lcd_update();
-    rb->button_clear_queue();
-    return rb->button_get(true);
-}
-
 /* ---- the options behind a held MENU ---- */
 
 /* accidental-press insurance: nothing in this menu truly deletes, it
@@ -1250,7 +1354,7 @@ static int ach_list_ui(void)
         rb->splashf(HZ, "%d new achievement%s!", newn, newn == 1 ? "" : "s");
 
     ach_build_order();
-    int cursor = 0, top = 0, egg_taps = 0;
+    int cursor = 0, top = 0;
     rb->button_clear_queue();
     ach_draw_screen(cursor, top, done, newn);
 
@@ -1261,8 +1365,6 @@ static int ach_list_ui(void)
             return PLUGIN_USB_CONNECTED;
         }
         int base = btn & ~BUTTON_REPEAT;
-        if (base != BUTTON_RIGHT)
-            egg_taps = 0;
         if (base == BUTTON_SCROLL_FWD) {
             cursor += wheel_steps();
             if (cursor > N_ACH - 1) cursor = N_ACH - 1;
@@ -1272,7 +1374,6 @@ static int ach_list_ui(void)
         } else if (base == BUTTON_RIGHT) {
             /* hop to the start of the next ladder (a page, when the
              * date sort has dissolved the ladders) */
-            int prev = cursor;
             if (ach_sort_bydate) {
                 cursor += ACH_ROWS;
                 if (cursor > N_ACH - 1) cursor = N_ACH - 1;
@@ -1280,18 +1381,6 @@ static int ach_list_ui(void)
                 int m = ach_table[cursor].metric;
                 while (cursor < N_ACH - 1 && ach_table[cursor].metric == m)
                     cursor++;
-            }
-            /* knocking on the end of the list three times... */
-            if (cursor == prev && cursor == N_ACH - 1) {
-                if (++egg_taps >= 3) {
-                    egg_taps = 0;
-                    if (ach_egg() == SYS_USB_CONNECTED) {
-                        rb->lcd_setfont(FONT_SYSFIXED);
-                        return PLUGIN_USB_CONNECTED;
-                    }
-                }
-            } else {
-                egg_taps = 0;
             }
         } else if (base == BUTTON_LEFT) {
             if (ach_sort_bydate) {

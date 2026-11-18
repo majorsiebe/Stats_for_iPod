@@ -603,6 +603,70 @@ index 35cd63d5fb..35794cb3e2 100644
      while (true)
      {
          switch (next_screen)
+diff --git a/apps/settings_list.c b/apps/settings_list.c
+index 7601cf66ca..90c32fbd7f 100644
+--- a/apps/settings_list.c
++++ b/apps/settings_list.c
+@@ -2439,7 +2439,7 @@ const struct settings_list settings[] = {
+     "auto,headphone,lineout", hp_lo_select_apply, 3,
+     ID2P(LANG_AUTO), ID2P(LANG_HEADPHONE), ID2P(LANG_LINEOUT)),
+ #endif
+-    OFFON_SETTING(0, playback_log, LANG_LOGGING, false, "play log", NULL),
++    OFFON_SETTING(0, playback_log, LANG_LOGGING, true, "play log", NULL),
+ #if defined(HAVE_GENERAL_PURPOSE_LED)
+     OFFON_SETTING(0, use_led_indicators, LANG_USE_LED_INDICATORS, false, "LED indicators", NULL),
+ #endif
+diff --git a/firmware/common/fat.c b/firmware/common/fat.c
+index 9a4446ef25..0588ff27b5 100644
+--- a/firmware/common/fat.c
++++ b/firmware/common/fat.c
+@@ -293,6 +293,14 @@ static struct bpb
+ static uint8_t fat_bounce_buffers[NUM_VOLUMES][BOUNCE_SECTOR_SIZE*FAT_BOUNCE_SECTORS] STORAGE_ALIGN_ATTR;
+ #define FAT_BOUNCE_BUFFER(bpb) \
+     (fat_bounce_buffers[IF_MV_VOL((bpb)->volume)])
++/* read() and write() hold the file system lock only as READER, so two
++ * threads can be in transfer() at once, and the ATA mutex covers each DMA
++ * but not the memcpy next to it. Unguarded, a writer's data staged here
++ * can be replaced by another thread's read DMA before it goes out (one
++ * sector of an MP3's cover art landed in playback.log, 2026-11-13), and
++ * a reader can copy out a sector that belongs to someone else. Held
++ * across every memcpy + transfer pair. */
++static struct mutex fat_bounce_mutex;
+ #endif
+ 
+ #define IS_FAT_SECTOR(bpb, sector) \
+@@ -2490,6 +2498,7 @@ static long transfer(struct bpb *fat_bpb, sector_t start, long count,
+ #ifdef STORAGE_NEEDS_BOUNCE_BUFFER
+     if(UNLIKELY(STORAGE_OVERLAP((uintptr_t)buf))) {
+         void* xfer_buf = FAT_BOUNCE_BUFFER(fat_bpb);
++        mutex_lock(&fat_bounce_mutex);
+         while(count > 0) {
+             int xfer_count = MIN(count*LOG_SECTOR_SIZE(fat_bpb), (FAT_BOUNCE_SECTORS * BOUNCE_SECTOR_SIZE)) / LOG_SECTOR_SIZE(fat_bpb);
+ 
+@@ -2510,6 +2519,7 @@ static long transfer(struct bpb *fat_bpb, sector_t start, long count,
+             start += xfer_count;
+             count -= xfer_count;
+         }
++        mutex_unlock(&fat_bounce_mutex);
+     } else {
+ #endif
+         if(write) {
+@@ -3066,6 +3076,15 @@ void fat_empty_fat_direntry(struct fat_direntry *entry)
+ 
+ void fat_init(void)
+ {
++#ifdef STORAGE_NEEDS_BOUNCE_BUFFER
++    /* fat_init runs again on every remount (USB unplug); never re-init
++     * a mutex someone could be queued on */
++    static bool bounce_mutex_ready = false;
++    if (!bounce_mutex_ready) {
++        mutex_init(&fat_bounce_mutex);
++        bounce_mutex_ready = true;
++    }
++#endif
+     dc_lock_cache();
+ 
+     /* mark the possible volumes as not mounted */
 diff --git a/firmware/target/arm/ipod/video/lcd-video.c b/firmware/target/arm/ipod/video/lcd-video.c
 index 27d889aafa..cc7e6539f4 100644
 --- a/firmware/target/arm/ipod/video/lcd-video.c

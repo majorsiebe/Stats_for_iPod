@@ -56,6 +56,7 @@
 #define CHEAT_DAT_MAGIC  0x57436831UL   /* "WCh1" */
 #define CHEAT_F_SIG_SEEN 0x1   /* a valid sig existed; its absence = cheat */
 #define CHEAT_F_CHEATED  0x2   /* tampering was detected at least once     */
+#define CHEAT_F_RECHECKED 0x4  /* the Spun 2.0 one-time re-check happened  */
 
 /* "start over" handshake: the achievements plugin deletes the whole log
  * family plus verdict/badge files and drops this flag. The core's signing

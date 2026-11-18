@@ -480,14 +480,25 @@ static void cheat_flags_load(void)
     cheat_flags_loaded = true;
     cheat_flags = 0;
     int fd = rb->open(CHEAT_DAT_PATH, O_RDONLY);
-    if (fd < 0)
-        return;
-    unsigned long magic = 0;
-    unsigned f = 0;
-    if (rb->read(fd, &magic, 4) == 4 && magic == CHEAT_DAT_MAGIC
-        && rb->read(fd, &f, 4) == 4)
-        cheat_flags = f;
-    rb->close(fd);
+    if (fd >= 0) {
+        unsigned long magic = 0;
+        unsigned f = 0;
+        if (rb->read(fd, &magic, 4) == 4 && magic == CHEAT_DAT_MAGIC
+            && rb->read(fd, &f, 4) == 4)
+            cheat_flags = f;
+        rb->close(fd);
+    }
+    /* Spun 2.0: v1.x could convict on a bad read (a shared buffer in the
+     * FAT driver, fixed in this build's core), and a verdict never expires.
+     * Every device gets one fresh look: the guilty bit is dropped once and
+     * the next crunch judges again - a log that really changed is back to
+     * rigged within seconds, a clean one stays clean. */
+    if (!(cheat_flags & CHEAT_F_RECHECKED)) {
+        bool was = (cheat_flags & CHEAT_F_CHEATED) != 0;
+        cheat_flags = (cheat_flags & ~CHEAT_F_CHEATED) | CHEAT_F_RECHECKED;
+        if (was)
+            cheat_flags_save();
+    }
 }
 
 static void cheat_mark(unsigned f)
@@ -542,14 +553,45 @@ static bool cheat_healed;   /* verdict went guilty->innocent on a retry: the
 static bool ach_reset_ran __attribute__((unused));  /* "start over" wiped the disk out from under
                              * whatever UI is currently open: fold gently */
 
+/* Why a guilty verdict latched, one line per new latch, so the next
+ * "rigged" can be told apart from a disk fault: a read race gives a
+ * different wrong hash on every look, a damaged sector the same one. */
+#define CHEAT_REASON_PATH "/.rockbox/spun_verdict.log"
+static void cheat_reason(const char *why, const struct pbl_sig *sig,
+                         bool sig_ok, const uint64_t *lh,
+                         const uint64_t *ln, int looks)
+{
+    int fd = rb->open(CHEAT_REASON_PATH, O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (fd < 0)
+        return;
+    struct tm *tm = rb->get_time();
+    rb->fdprintf(fd, "%04d-%02d-%02d %02d:%02d:%02d %s",
+                 tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+                 tm->tm_hour, tm->tm_min, tm->tm_sec, why);
+    if (sig_ok)
+        rb->fdprintf(fd, " sig n=%lu h=%08lx%08lx f=%lu",
+                     (unsigned long)sig->nbytes,
+                     (unsigned long)(sig->hash >> 32),
+                     (unsigned long)(uint32_t)sig->hash, (unsigned long)sig->flags);
+    else
+        rb->fdprintf(fd, " sig none");
+    for (int i = 0; i < looks; i++)
+        rb->fdprintf(fd, " | n=%lu h=%08lx%08lx", (unsigned long)ln[i],
+                     (unsigned long)(lh[i] >> 32), (unsigned long)(uint32_t)lh[i]);
+    rb->fdprintf(fd, "\n");
+    rb->close(fd);
+}
+
 static void cheat_judge(const struct pbl_sig *sig_pre, bool sig_pre_ok)
 {
     struct pbl_sig sig;
     bool     sig_ok = sig_pre_ok;
     uint64_t h = lrd_hash, n = lrd_hash_n;
+    uint64_t look_h[CHEAT_LOOKS], look_n[CHEAT_LOOKS];
 
     cheat_flags_load();
     cheat_healed = false;
+    bool was_cheated = (cheat_flags & CHEAT_F_CHEATED) != 0;
     /* a pending "start over": the disk is mid-reset on purpose; the core
      * consumes the flag and re-blesses at the next boot */
     if (rb->file_exists(SPUN_RESET_FLAG)) {
@@ -560,10 +602,14 @@ static void cheat_judge(const struct pbl_sig *sig_pre, bool sig_pre_ok)
         sig = *sig_pre;
 
     for (int look = 1; ; look++) {
+        look_h[look - 1] = h;
+        look_n[look - 1] = n;
         if (sig_ok) {
             cheat_mark(CHEAT_F_SIG_SEEN);
             if (sig.flags & PBL_SIG_TAINTED) {
                 cheat_live = 1;
+                if (!was_cheated)
+                    cheat_reason("tainted", &sig, true, look_h, look_n, look);
                 cheat_mark(CHEAT_F_CHEATED);
                 return;
             }
@@ -595,6 +641,8 @@ static void cheat_judge(const struct pbl_sig *sig_pre, bool sig_pre_ok)
         return;
     }
     cheat_live = 1;
+    if (!was_cheated)
+        cheat_reason("mismatch", &sig, sig_ok, look_h, look_n, CHEAT_LOOKS);
     cheat_mark(CHEAT_F_CHEATED);
 }
 
@@ -610,8 +658,11 @@ static void cheat_judge_scrob(void)
         return;
     }
     struct pbl_sig s;
-    if (sig_read(&s) || (cheat_flags & CHEAT_F_SIG_SEEN)) {
+    bool s_ok = sig_read(&s);
+    if (s_ok || (cheat_flags & CHEAT_F_SIG_SEEN)) {
         cheat_live = 1;
+        if (!(cheat_flags & CHEAT_F_CHEATED))
+            cheat_reason("scrobbler", &s, s_ok, NULL, NULL, 0);
         cheat_mark(CHEAT_F_CHEATED);
     } else {
         cheat_live = -1;
@@ -809,7 +860,18 @@ static void path_to_meta(const char *path, char *artist, int asz, char *title, i
  * ============================================================ */
 
 #define DBMAP_PATH  "/.rockbox/wrapped_dbmap.dat"
-#define DBMAP_MAGIC 0x57446231UL   /* "WDb1" */
+#define DBMAP_MAGIC 0x57446232UL   /* "WDb2": hashes of canon_path() */
+
+/* Rockbox names one file two ways: the database and resumed queues use
+ * the volume form "/<HDD0>/Music/x.mp3", the file browser "/Music/x.mp3".
+ * Fold the first volume onto the root so one song keeps one name. */
+static const char *canon_path(const char *p)
+{
+    static const char vol0[] = "/<HDD0>";
+    if (!rb->strncmp(p, vol0, sizeof(vol0) - 1) && p[sizeof(vol0) - 1] == '/')
+        return p + sizeof(vol0) - 1;
+    return p;
+}
 
 struct dbmap_ent {
     unsigned       hash;     /* hash_str of the full file path   */
@@ -862,7 +924,7 @@ static const struct dbmap_ent *dbmap_get(const char *path)
 {
     if (!dbmap_n)
         return NULL;
-    unsigned h = hash_str(path);
+    unsigned h = hash_str(canon_path(path));
     int s = (int)(h & dbmap_mask);
     while (dbmap_slots[s]) {
         const struct dbmap_ent *e = &dbmap[dbmap_slots[s] - 1];
@@ -956,7 +1018,7 @@ static void dbmap_init(void)
     while (dbmap_n < dbmap_cap
            && rb->tagcache_get_next(&tcs, fname, sizeof(fname))) {
         struct dbmap_ent *e = &dbmap[dbmap_n];
-        e->hash = hash_str(fname);
+        e->hash = hash_str(canon_path(fname));
         e->pad  = 0;
         e->artist = rb->tagcache_retrieve(&tcs, tcs.idx_id, tag_artist,
                                           meta, sizeof(meta))
@@ -1006,7 +1068,55 @@ static bool resolve_meta(const char *path, char *artist, char *title,
             return album[0] != '\0';
         }
     }
-    path_to_meta(path, artist, NAME_MAX_LEN, title, NAME_MAX_LEN);
+    path_to_meta(canon_path(path), artist, NAME_MAX_LEN, title, NAME_MAX_LEN);
+    return false;
+}
+
+/* ---- pardons: log lines excused from judgment ----
+ * A skip is a verdict the listener passes on a song; a crash, a dead
+ * battery or a mid-song poweroff is a verdict the machine passes on
+ * itself. Lines listed in /.rockbox/spun_pardons.txt ("timestamp:path",
+ * matching the playback.log entry exactly; '#' comments allowed) count
+ * as neither play nor skip. The log itself stays untouched - and
+ * signed. Playback-log mode only: a .scrobbler.log stamps its rating
+ * at event time, there is nothing to reinterpret. */
+#define PARDON_PATH ROCKBOX_DIR "/spun_pardons.txt"
+#define PARDON_MAX 16
+
+static struct pardon { unsigned long ts; char path[MAX_PATH]; }
+    pardons[PARDON_MAX];
+static int pardon_n;
+
+static void pardons_load(void)
+{
+    pardon_n = 0;
+    int fd = rb->open(PARDON_PATH, O_RDONLY);
+    if (fd < 0)
+        return;
+    char line[MAX_PATH + 32];
+    while (pardon_n < PARDON_MAX
+           && rb->read_line(fd, line, sizeof(line)) > 0) {
+        if (line[0] == '#' || line[0] == '\0')
+            continue;
+        char *end = line + rb->strlen(line);
+        while (end > line && (end[-1] == '\r' || end[-1] == '\n'))
+            *--end = '\0';
+        unsigned long ts = parse_ul(line);
+        char *p = next_colon(line);
+        if (!ts || !p || p[0] == '\0')
+            continue;
+        pardons[pardon_n].ts = ts;
+        rb->strlcpy(pardons[pardon_n].path, p, MAX_PATH);
+        pardon_n++;
+    }
+    rb->close(fd);
+}
+
+static bool pardoned(unsigned long ts, const char *path)
+{
+    for (int i = 0; i < pardon_n; i++)
+        if (pardons[i].ts == ts && !rb->strcmp(pardons[i].path, path))
+            return true;
     return false;
 }
 
@@ -1014,6 +1124,7 @@ static long playback_parse(void)
 {
     if (!lrd_open_playback())
         return -1;
+    pardons_load();
 
     char line[640];
     long lines = 0;
@@ -1080,8 +1191,9 @@ static long playback_parse(void)
             if (valid_ts)
                 tally_time(ts, elapsed);
             ACH_HOOK(ts, valid_ts, true, elapsed, artist, title);
-        } else if (el_ms >= 5000) {
-            /* under 5s heard = a browsing tap, not a judgement on the song */
+        } else if (el_ms >= 5000 && !pardoned(ts, path)) {
+            /* under 5s heard = a browsing tap, not a judgement on the song;
+             * a pardoned line was the machine's failure, not a verdict */
             total_skips++;
             struct agg *a = htable_get(&t_track, title);
             if (a) a->skips++;
@@ -2126,6 +2238,8 @@ static void week_scan(int wi, struct week_info *w)
     bool scrob = src_scrob;
     if (scrob ? !lrd_open(LOG_PATH) : !lrd_open_playback())
         return;
+    if (!scrob)
+        pardons_load();
 
     char line[640];
     char *f[8];
@@ -2157,8 +2271,8 @@ static void week_scan(int wi, struct week_info *w)
             resolve_meta(p, artist, title, walbum);
             listened = (len_ms == 0) || (el_ms * 2 >= len_ms) || (el_ms >= 240000UL);
             psecs = (unsigned)(el_ms / 1000);
-            if (!listened && el_ms < 5000)
-                continue;   /* browsing tap, same rule as playback_parse */
+            if (!listened && (el_ms < 5000 || pardoned(ts, p)))
+                continue;   /* browsing tap / pardon, same as playback_parse */
         }
 
         if (ts < MIN_VALID_TS) continue;
@@ -2560,8 +2674,6 @@ static int draw_card_body(int idx, int dir)
                          best / 60, best % 60, month_abbr[bm], bd);
             center_text(158, buf2, COL_TEXT_LIGHT);
         }
-        center_text(186, "one square, one day - go fill the grid",
-                    COL_TEXT_DIM);
         break;
     }
     case CARD_TYPE: { /* listening personality: 4 axes -> 1 of 16 types */
@@ -2836,6 +2948,28 @@ static bool wrapped_reload(void);
  * offer the year picker when the log spans several (Wrapped); pass false
  * for an unfiltered all-time crunch (achievements). Returns false when
  * there's nothing to show - the reason has already been splashed. */
+/* the achievement watcher re-reads the log in the background, after
+   every plugin the user runs: it must not speak (a new user's empty log
+   splashed after each game) */
+static bool wrapped_quiet;
+
+/* Loading messages replace each other instead of stacking: a splash only
+ * paints its own box, so a shorter one over a longer one (or over the year
+ * picker) leaves the old edges showing. Every caller returns to a screen
+ * that redraws in full, so clearing first is free. */
+static void load_msg(const char *msg)
+{
+    if (wrapped_quiet) {
+        /* the watcher, at boot and after every plugin: over whatever is
+         * on screen, as before v2 (the clear read as a black screen) */
+        rb->splashf(0, "%s", msg);
+        return;
+    }
+    rb->lcd_clear_display();
+    rb->lcd_update();
+    rb->splashf(0, "%s", msg);
+}
+
 static bool wrapped_load_data(bool ask_year)
 {
     /* grab the plugin buffer for aggregation */
@@ -2869,7 +3003,7 @@ static bool wrapped_load_data(bool ask_year)
     g_cap_art = cap_art;
     g_cap_alb = cap_alb;
 
-    rb->splash(0, "Crunching your year...");
+    load_msg("Loading...");
 
     /* pick the data source once, up front: a scrobbler log that actually
      * holds data wins; otherwise the core's playback.log */
@@ -2900,6 +3034,7 @@ static bool wrapped_load_data(bool ask_year)
             int choice = 1;                 /* default to the newest year */
             rb->set_option("Your year in music", &choice, RB_INT, opts, ny + 1, NULL);
             filter_year = (choice <= 0) ? 0 : years[choice - 1];
+            load_msg("Loading...");     /* the crunch is still to come */
         }
     }
 
@@ -2979,13 +3114,16 @@ static bool wrapped_reload_once(void)
         cheat_judge(&sig_pre, sig_pre_ok);
     }
 
-    if (n < 0) {
-        rb->splash(HZ*3,
-            "No log yet. Settings > Playback > Logging = On, reboot, play tracks.");
+    if (n < 0 && !rb->global_settings->playback_log) {
+        if (!wrapped_quiet)
+            rb->splash(HZ*3, "Logging is off. Settings > Playback > Logging = On");
         return false;
     }
+    if (n < 0)
+        n = 0;                  /* logging on, file not written yet */
     if (n == 0) {
-        rb->splash(HZ*3, "Log is empty - go listen to something!");
+        if (!wrapped_quiet)
+            rb->splash(HZ*3, "Log is empty - go listen to something!");
         return false;
     }
 
