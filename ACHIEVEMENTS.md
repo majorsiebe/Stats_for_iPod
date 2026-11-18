@@ -1,12 +1,9 @@
-# Spun — The Complete Achievement Wall
+# All Spun achievements!
 
 > **SPOILER WARNING:** this is every badge, including all the secret
 > ones. If you'd rather discover them on the iPod, close this file now.
 
-**345 achievements total, 72 of them secret.** Earned badges show gold
-on the iPod. Green means cheated — the iPod signs its own listening
-history and knows when a PC edited it. It will call you out. Don't
-even try.
+**345 achievements total, 72 secret ones.**
 
 <details>
 <summary><b>Show all 345 achievements</b></summary>
