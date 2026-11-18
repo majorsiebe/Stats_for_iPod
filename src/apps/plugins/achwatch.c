@@ -49,9 +49,9 @@ static void ach_tally(unsigned long ts, bool valid_ts, bool listened,
 #define EV_TRACK MAKE_SYS_EVENT(SYS_EVENT_CLS_PRIVATE, 0x01)
 #define EV_TEST  MAKE_SYS_EVENT(SYS_EVENT_CLS_PRIVATE, 0x02)
 
-/* while this file exists, the root menu skips the boot auto-start;
- * "Turn off" creates it, a manual start deletes it again */
-#define ACHWATCH_OFF_FLAG "/.rockbox/achwatch_off"
+/* ACHWATCH_OFF_FLAG / ACHWATCH_TEST_REQ (wrapped_core.h): Spun's settings
+ * page leaves them while we're paused; the root menu skips the boot
+ * auto-start while the off flag exists, a manual start deletes it */
 
 /* track info is copied here on the playback thread, processed on ours */
 struct pend {
@@ -364,43 +364,29 @@ static int exit_tsr(bool reenter)
         return PLUGIN_TSR_SUSPEND;
     }
 
-    /* the user launched us again: small control menu */
-    MENUITEM_STRINGLIST(menu, "Achievement watcher", NULL,
-                        "Send test toast (5 s)", "Turn off",
-                        "Delete Spun backups", "Keep running");
-    switch (rb->do_menu(&menu, NULL, NULL, false)) {
-    case 0:
-        rb->queue_post(&gThread.queue, EV_TEST, *rb->current_tick);
-        rb->splash(HZ, "Go where you like - toast in 5 s");
-        return PLUGIN_TSR_CONTINUE;
-    case 1: {
-        watcher_stop();
-        int fd = rb->open(ACHWATCH_OFF_FLAG, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-        if (fd >= 0) { rb->write(fd, "1", 1); rb->close(fd); }
-        rb->splash(HZ, "Watcher off (start it to re-enable)");
-        return PLUGIN_TSR_TERMINATE;
+    /* launched again while running: its options live on Spun's settings
+     * page now */
+    rb->splash(HZ, "Achievement watcher on");
+    return PLUGIN_TSR_CONTINUE;
+}
+
+/* "Send test toast" presses from Spun's settings page, made while we were
+ * paused: post each with its own press tick (the two-inside-a-minute badge
+ * reads them), then clear the mailbox */
+static void take_test_requests(void)
+{
+    int32_t t[ACHWATCH_TEST_MAX];
+    int n = 0;
+    int fd = rb->open(ACHWATCH_TEST_REQ, O_RDONLY);
+    if (fd >= 0) {
+        int got = rb->read(fd, t, sizeof t);
+        rb->close(fd);
+        if (got > 0)
+            n = got / 4;
     }
-    case 2: {
-        /* the real delete behind the soft one in the Spun menus */
-        static const char *lines[] = {
-            "Delete the .bak backups?",
-            "This one is for real -",
-            "no way back afterwards.",
-        };
-        const struct text_message msg = { lines, 3 };
-        if (rb->gui_syncyesno_run(&msg, NULL, NULL) == YESNO_YES) {
-            int n = spun_purge_backups();
-            if (n > 0)
-                rb->splashf(HZ * 2, "%d backup file%s deleted",
-                            n, n == 1 ? "" : "s");
-            else
-                rb->splash(HZ * 2, "No backups to delete");
-        }
-        return PLUGIN_TSR_CONTINUE;
-    }
-    default:
-        return PLUGIN_TSR_CONTINUE;
-    }
+    rb->remove(ACHWATCH_TEST_REQ);
+    for (int i = 0; i < n; i++)
+        rb->queue_post(&gThread.queue, EV_TEST, (intptr_t)t[i]);
 }
 
 enum plugin_status plugin_start(const void *parameter)
@@ -411,8 +397,15 @@ enum plugin_status plugin_start(const void *parameter)
     (void)ach_show;               /* only engine + parser used here  */
     wrapped_quiet = true;         /* background re-reads never splash */
 
+    if (resumed && rb->file_exists(ACHWATCH_OFF_FLAG)) {
+        /* switched off on Spun's settings page while we were paused */
+        rb->remove(ACHWATCH_TEST_REQ);
+        return PLUGIN_OK;
+    }
     if (!resumed && !autoboot)
         rb->remove(ACHWATCH_OFF_FLAG);   /* manual start = re-enable boot */
+    if (!resumed)
+        rb->remove(ACHWATCH_TEST_REQ);   /* only a pause carries requests */
 
     wrapped_font_init();          /* the toast banner draws with it */
     if (!rebase()) {
@@ -428,6 +421,8 @@ enum plugin_status plugin_start(const void *parameter)
     rb->add_event(PLAYBACK_EVENT_TRACK_FINISH, track_finish_cb);
     armed = true;
     rb->plugin_tsr(exit_tsr);
+    if (resumed)
+        take_test_requests();
 
     if (!resumed && !autoboot) {  /* silent when auto-started or resumed */
         rb->lcd_clear_display();  /* not on top of the Loading splash */

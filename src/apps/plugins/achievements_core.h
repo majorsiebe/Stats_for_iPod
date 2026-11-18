@@ -1188,11 +1188,11 @@ static void ach_draw_screen(int cursor, int top, int done, int newn)
 #endif
 }
 
-/* ---- the options behind a held MENU ---- */
+/* ---- the data rows of the settings page ---- */
 
-/* accidental-press insurance: nothing in this menu truly deletes, it
- * benches the file as <path>.bak (one slot, newest wins). The permanent
- * delete lives in the watcher's menu, where nobody lands by accident. */
+/* accidental-press insurance: "Delete badge progress" and "Start over"
+ * don't truly delete, they bench the file as <path>.bak (one slot, newest
+ * wins). Only "Delete Spun backups" removes for good. */
 static bool spun_bench(const char *path)
 {
     char bak[64];
@@ -1201,7 +1201,7 @@ static bool spun_bench(const char *path)
     return rb->rename(path, bak) == 0;
 }
 
-/* the true delete: shred every .bak the options menu benched */
+/* the true delete: shred every .bak the settings rows benched */
 static int spun_purge_backups(void) __attribute__((unused));
 static int spun_purge_backups(void)
 {
@@ -1227,15 +1227,16 @@ static int spun_purge_backups(void)
 
 /* forget dates, gold, NEW markers and the toast counters; the badges
  * themselves recompute from the log on the spot */
+static bool ach_wipe_progress(void) __attribute__((unused));
 static bool ach_wipe_progress(void)
 {
     static const char *lines[] = {
-        "Delete badge progress?",
-        "Unlock dates, gold and toasts",
-        "reset - a .bak copy is kept.",
+        "Delete achievement progress?",
+        "Unlock dates, gold and toasts reset.",
+        "A .bak copy is kept.",
     };
     const struct text_message msg = { lines, 3 };
-    if (rb->gui_syncyesno_run(&msg, NULL, NULL) != YESNO_YES)
+    if (!spun_yes(&msg))
         return false;
     spun_bench(ACH_SEEN_PATH);
     spun_bench(ACH_TOAST_FLAG);
@@ -1246,30 +1247,31 @@ static bool ach_wipe_progress(void)
     ach_when_legacy = false;
     ach_toast_count = 0;
     ach_toast_burst = false;
-    rb->splash(HZ * 2, "Badge progress deleted");
+    rb->splash(HZ * 2, "Achievement progress deleted");
     return true;
 }
 
 /* the sanctioned full amnesty, from the couch instead of a USB cable:
  * logs + sig + verdict + badges go together (deleting only part of that
  * set is what the cheat detection exists to catch) */
+static bool ach_start_over(void) __attribute__((unused));
 static bool ach_start_over(void)
 {
     static const char *l1[] = {
         "Start over completely?",
-        "Erases the whole listening",
-        "history, verdict and badges.",
+        "Erases your whole listening history,",
+        "verdict and achievements.",
     };
     const struct text_message m1 = { l1, 3 };
-    if (rb->gui_syncyesno_run(&m1, NULL, NULL) != YESNO_YES)
+    if (!spun_yes(&m1))
         return false;
     static const char *l2[] = {
-        "Last chance - really start over?",
-        "The old files stay as .bak",
-        "copies until you purge them.",
+        "Last chance. Really start over?",
+        "The old files stay as .bak copies",
+        "until you delete the backups.",
     };
     const struct text_message m2 = { l2, 3 };
-    if (rb->gui_syncyesno_run(&m2, NULL, NULL) != YESNO_YES)
+    if (!spun_yes(&m2))
         return false;
 
     rb->add_playbacklog(NULL);        /* buffered lines out first */
@@ -1303,36 +1305,8 @@ static bool ach_start_over(void)
     ach_when_legacy = false;
     ach_toast_count = 0;
     ach_toast_burst = false;
-    rb->splash(HZ * 3, "Everything forgotten - restart to finish");
+    rb->splash(HZ * 3, "Everything forgotten. Restart to finish.");
     return true;
-}
-
-static void ach_options(int *done, int *newn)
-{
-    MENUITEM_STRINGLIST(menu, "Achievements", NULL,
-                        "Sort by unlock date", "Sort by ladder",
-                        "Delete badge progress", "Start over completely");
-    int sel = ach_sort_bydate ? 1 : 0;
-    switch (rb->do_menu(&menu, &sel, NULL, false)) {
-    case 0: ach_sort_bydate = true;  break;
-    case 1: ach_sort_bydate = false; break;
-    case 2:
-        if (ach_wipe_progress()) {
-            /* everything still earned re-stamps as fresh gold and NEW */
-            if (ach_record_unlocks())
-                ach_seen_save();
-            *done = ach_classify();
-            *newn = 0;
-            for (int i = 0; i < N_ACH; i++)
-                if (new_get(i)) (*newn)++;
-        }
-        break;
-    case 3:
-        if (ach_start_over())
-            ach_reset_ran = true;
-        break;
-    }
-    ach_build_order();
 }
 
 /* the badge list itself; call with an ALL-TIME crunch already loaded.
@@ -1353,6 +1327,7 @@ static int ach_list_ui(void)
     if (newn > 0)
         rb->splashf(HZ, "%d new achievement%s!", newn, newn == 1 ? "" : "s");
 
+    ach_sort_bydate = spun_cfg.badge_bydate;    /* the settings page's pick */
     ach_build_order();
     int cursor = 0, top = 0;
     rb->button_clear_queue();
@@ -1412,16 +1387,9 @@ static int ach_list_ui(void)
         } else if (base == BUTTON_PLAY) {
             save_card();
         } else if (btn == BUTTON_MENU) {
-            continue;              /* decide on the repeat or the release */
-        } else if (btn == (BUTTON_MENU | BUTTON_REPEAT)) {
-            ach_options(&done, &newn);
-            if (ach_reset_ran) {
-                rb->lcd_setfont(FONT_SYSFIXED);
-                return PLUGIN_OK;
-            }
-            rb->button_clear_queue();
-        } else if (btn == (BUTTON_MENU | BUTTON_REL)) {
-            break;                 /* a tapped MENU still just leaves */
+            continue;              /* leave on the release */
+        } else if ((btn & ~BUTTON_REPEAT) == (BUTTON_MENU | BUTTON_REL)) {
+            break;
         } else {
             continue;
         }
@@ -1559,6 +1527,27 @@ static int ach_wrapped_card(int idx, int dir)
     present_card(dir);
     return animate_count(rig ? &ach_th_rigged : th, SCREEN_W/2, hero_band_y,
                          34, 56, 10, ach_cache_done);
+}
+
+/* settings page: "Delete badge progress" - everything still earned
+ * re-stamps right away (from an all-time crunch: ach_recount swaps one in
+ * when the deck is year-scoped), so the watcher resumes onto a recorded
+ * set instead of an empty one */
+static bool ach_set_wipe(void)
+{
+    if (!ach_wipe_progress())
+        return false;
+    ach_recount();
+    return true;
+}
+
+/* settings page: "Start over completely"; true = the deck must close */
+static bool ach_set_start_over(void)
+{
+    if (!ach_start_over())
+        return false;
+    ach_reset_ran = true;
+    return true;
 }
 
 static int ach_browse(void)

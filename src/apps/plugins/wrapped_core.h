@@ -1372,6 +1372,9 @@ enum card_id {
 /* implemented in achievements_core.h, included after this header */
 static int ach_wrapped_card(int idx, int dir);
 static int ach_browse(void);
+static bool ach_set_wipe(void);
+static bool ach_set_start_over(void);
+static int spun_purge_backups(void);
 #endif
 
 /* vivid, Spotify-Wrapped-style palettes, one per card */
@@ -1765,6 +1768,66 @@ static void hide_save(void)
     rb->close(fd);
 }
 
+/* ---- settings (the page after the outro) ----
+ * wrapped_hide.dat keeps the hidden-card bits; the rest lives here. Taste,
+ * not history: "Start over" leaves both alone. Zero = default, so a short
+ * or older file reads back as defaults for whatever it lacks. */
+#define SPUN_CFG_PATH  "/.rockbox/spun_settings.dat"
+#define SPUN_CFG_MAGIC 0x53705331UL   /* "SpS1" */
+enum { OPEN_ASK = 0, OPEN_NEWEST, OPEN_ALLTIME, OPEN_N };
+static int log_latest_year;     /* newest year in the log, 0 = not known */
+static bool log_empty;          /* the last load found nothing logged */
+
+/* a yes/no a double-tap can't answer: presses in the first half second
+ * are dropped before the question even appears */
+static bool spun_yes(const struct text_message *msg) __attribute__((unused));
+static bool spun_yes(const struct text_message *msg)
+{
+    rb->sleep(HZ / 2);
+    rb->button_clear_queue();
+    return rb->gui_syncyesno_run(msg, NULL, NULL) == YESNO_YES;
+}
+static struct {
+    uint8_t deck_open;      /* OPEN_*: what the deck shows on a multi-year log */
+    uint8_t badge_bydate;   /* badge browser order: 1 = unlock date */
+    uint8_t spare[6];
+} spun_cfg;
+
+static void spun_cfg_load(void)
+{
+    rb->memset(&spun_cfg, 0, sizeof spun_cfg);
+    int fd = rb->open(SPUN_CFG_PATH, O_RDONLY);
+    if (fd < 0)
+        return;
+    uint32_t m = 0;
+    if (rb->read(fd, &m, 4) == 4 && m == SPUN_CFG_MAGIC)
+        rb->read(fd, &spun_cfg, sizeof spun_cfg);
+    rb->close(fd);
+    if (spun_cfg.deck_open >= OPEN_N)
+        spun_cfg.deck_open = OPEN_ASK;
+    spun_cfg.badge_bydate = spun_cfg.badge_bydate ? 1 : 0;
+}
+
+static void spun_cfg_save(void)
+{
+    int fd = rb->open(SPUN_CFG_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0)
+        return;
+    uint32_t m = SPUN_CFG_MAGIC;
+    rb->write(fd, &m, 4);
+    rb->write(fd, &spun_cfg, sizeof spun_cfg);
+    rb->close(fd);
+}
+
+/* The achievement watcher is paused while Spun runs (the loader suspends a
+ * resident plugin and resumes it after), so the settings page talks to it
+ * through files it reads on the way back in. While achwatch_off exists the
+ * watcher stays down, at boot and on resume; achwatch_test holds the press
+ * ticks (int32 each) of "Send test toast". */
+#define ACHWATCH_OFF_FLAG  "/.rockbox/achwatch_off"
+#define ACHWATCH_TEST_REQ  "/.rockbox/achwatch_test"
+#define ACHWATCH_TEST_MAX  8
+
 /* pill-style page indicator at the bottom (hidden cards get no dot) */
 static void page_dots(int idx, const struct theme *th)
 {
@@ -1859,7 +1922,7 @@ static bool dump_claim(const char *dst)
 #endif
 
 /* render every card in its finished state and screendump each one;
- * lives behind SELECT on the outro card */
+ * "Save all cards" on the settings page */
 static int draw_card(int idx, int dir);
 
 static void export_deck(void)
@@ -1878,7 +1941,7 @@ static void export_deck(void)
     for (int i = 0; i < N_CARDS; i++) {
         if (card_hidden(i))              /* hidden from the deck, hidden */
             continue;                    /* from the export too          */
-        rb->splashf(0, "Saving card %d of %d...", ++nth, total);
+        rb->splashf(0, "Saving page %d of %d...", ++nth, total);
         draw_card(i, 0);
         rb->screen_dump();
         char dst[40];
@@ -1891,7 +1954,7 @@ static void export_deck(void)
     rb->cpu_boost(false);
 #endif
     export_mode = false;
-    rb->splashf(HZ * 2, "%d cards saved in /wrapped_cards", saved);
+    rb->splashf(HZ * 2, "%d pages saved in /wrapped_cards", saved);
 #else
     rb->splash(HZ, "No screendump in this build");
 #endif
@@ -2392,8 +2455,12 @@ static int draw_card_body(int idx, int dir)
             int y1,m1,d1,y2,m2,d2;
             civil_from_days(ts_min / 86400, &y1, &m1, &d1);
             civil_from_days(ts_max / 86400, &y2, &m2, &d2);
-            rb->snprintf(buf2, sizeof buf2, "%s %d  -  %s %d %d",
-                         month_abbr[m1], d1, month_abbr[m2], d2, y2);
+            if (y1 != y2)
+                rb->snprintf(buf2, sizeof buf2, "%s %d %d  -  %s %d %d",
+                             month_abbr[m1], d1, y1, month_abbr[m2], d2, y2);
+            else
+                rb->snprintf(buf2, sizeof buf2, "%s %d  -  %s %d %d",
+                             month_abbr[m1], d1, month_abbr[m2], d2, y2);
             center_text(178, buf2, COL_TEXT_DIM);
         }
         center_text(208, "spin to begin  >", th->accent);
@@ -2557,7 +2624,7 @@ static int draw_card_body(int idx, int dir)
 
         if (!display_year) {   /* all-time view with an unset clock */
             center_text(104, "no clock, no calendar", COL_TEXT_LIGHT);
-            center_text(126, "set the time & date to unlock this card",
+            center_text(126, "set the time & date to unlock this page",
                         COL_TEXT_DIM);
             break;
         }
@@ -2619,7 +2686,7 @@ static int draw_card_body(int idx, int dir)
 
         if (!display_year) {
             center_text(104, "no clock, no calendar", COL_TEXT_LIGHT);
-            center_text(126, "set the time & date to unlock this card",
+            center_text(126, "set the time & date to unlock this page",
                         COL_TEXT_DIM);
             break;
         }
@@ -2786,7 +2853,7 @@ static int draw_card_body(int idx, int dir)
         kicker(40, "THAT'S A WRAP", th->accent);
         accent_underline(th, 60);
         if (!export_mode)
-            center_text(64, "SELECT: save the whole deck", COL_TEXT_DIM);
+            center_text(64, "settings  >", COL_TEXT_DIM);
         long mins = total_seconds / 60;
         struct agg *a[1];
         int y = 88;
@@ -2972,6 +3039,8 @@ static void load_msg(const char *msg)
 
 static bool wrapped_load_data(bool ask_year)
 {
+    spun_cfg_load();
+
     /* grab the plugin buffer for aggregation */
     abuf = rb->plugin_get_buffer(&abuf_sz);
     abuf_used = 0;
@@ -3013,14 +3082,18 @@ static bool wrapped_load_data(bool ask_year)
         src_scrob = (have_scrob == 1) || (have_scrob >= 0 && have_pbl < 0);
     }
 
-    /* If the log spans more than one year, let the user scope Wrapped to one
-     * (so 2026 stays viewable in 2027). One year -> all-time, no prompt.
-     * (splash is already up: this pre-scan reads the whole log too) */
+    /* If the log spans more than one year, the deck can show just one (so
+     * 2026 stays viewable in 2027): asked each time, or the settings page's
+     * standing answer. One year -> all-time, no prompt. "All time" skips
+     * the pre-scan, which reads the whole log too (splash is already up). */
     filter_year = 0;
-    if (ask_year) {
+    if (ask_year && spun_cfg.deck_open != OPEN_ALLTIME) {
         int years[16];
         int ny = collect_years(years, 16);
-        if (ny > 1) {
+        log_latest_year = ny > 0 ? years[0] : 0;
+        if (ny > 1 && spun_cfg.deck_open == OPEN_NEWEST) {
+            filter_year = years[0];
+        } else if (ny > 1) {
             static char ylabel[17][12];
             struct opt_items opts[17];
             rb->strlcpy(ylabel[0], "All-time", sizeof(ylabel[0]));
@@ -3117,13 +3190,15 @@ static bool wrapped_reload_once(void)
     if (n < 0 && !rb->global_settings->playback_log) {
         if (!wrapped_quiet)
             rb->splash(HZ*3, "Logging is off. Settings > Playback > Logging = On");
+        log_empty = true;
         return false;
     }
     if (n < 0)
         n = 0;                  /* logging on, file not written yet */
     if (n == 0) {
         if (!wrapped_quiet)
-            rb->splash(HZ*3, "Log is empty - go listen to something!");
+            rb->splash(HZ*3, "Log is empty. Go listen to something!");
+        log_empty = true;
         return false;
     }
 
@@ -3162,13 +3237,417 @@ static bool wrapped_reload(void)
     return ok;
 }
 
+/* ============================================================
+ *  Settings: one step past the outro.
+ *  SETTINGS:  Show stats for | Save all pages | Pages > | Achievements >
+ *             | Danger zone > (red)
+ *  Each page is one list; a dim footer explains the highlighted row.
+ * ============================================================ */
+
+/* each hideable page by its own title */
+static const char *card_title(int idx)
+{
+    switch (idx) {
+    case CARD_MINUTES: return "Minutes listened";
+    case CARD_PLAYS:   return "Tracks played";
+    case CARD_ARTISTS: return "Top artists";
+    case CARD_SONGS:   return "Top songs";
+    case CARD_ALBUMS:  return "Top albums";
+    case CARD_CLOCK:   return "Listening clock";
+    case CARD_NIGHT:   return "The 3am Club";
+    case CARD_SKIPS:   return "Skip report";
+    case CARD_LOYAL:   return "Never skipped";
+    case CARD_REDIS:   return "Remember these?";
+    case CARD_HEAT:    return "Every day of it";
+    case CARD_TYPE:    return "Listening type";
+    default:           return "?";
+    }
+}
+
+static const struct theme set_theme = {
+    LCD_RGBPACK( 36, 42, 58), LCD_RGBPACK( 12, 14, 22),
+    LCD_RGBPACK(240,244,255), LCD_RGBPACK(190,205,235), LCD_RGBPACK(150,205,255)
+};
+#ifdef WRAPPED_WITH_ACH
+/* the rows that bench or delete history: red, and a step away */
+static const struct theme danger_theme = {
+    LCD_RGBPACK( 66, 24, 28), LCD_RGBPACK( 22,  8, 10),
+    LCD_RGBPACK(255,240,238), LCD_RGBPACK(255,190,180), LCD_RGBPACK(255,120,105)
+};
+#endif
+#define COL_DANGER  LCD_RGBPACK(255,120,105)
+
+#define SET_TOP    42
+#define SET_ROW_H  20
+#define SET_MAX    (N_CARDS + 2)
+
+struct set_item {
+    const char *label;
+    const char *value;          /* NULL: an action row */
+    const char *help;           /* footer while highlighted; NULL = none */
+    bool dim;                   /* value in the dim colour */
+    bool gap;                   /* starts a group: a little air above */
+    bool danger;                /* drawn red */
+};
+
+/* the highlighted row's help, word-wrapped onto up to 3 centred lines
+ * at the bottom, under a faint rule */
+static void set_help(const struct theme *th, const char *s)
+{
+    char ln[3][64];
+    int nl = 0, w, h;
+    rb->lcd_setfont(body_font);
+    while (*s == ' ') s++;
+    while (*s && nl < 3) {
+        int fit = 0, e = 0;
+        for (;;) {                       /* grow word by word */
+            while (s[e] == ' ') e++;
+            while (s[e] && s[e] != ' ') e++;
+            if (e >= (int)sizeof ln[0])
+                break;
+            rb->memcpy(ln[nl], s, e);
+            ln[nl][e] = '\0';
+            rb->lcd_getstringsize(ln[nl], &w, &h);
+            if (w > SCREEN_W - 24 && fit)
+                break;
+            fit = e;
+            if (!s[e])
+                break;
+        }
+        if (!fit)
+            break;
+        if (nl == 2 && s[fit])           /* out of lines: end with ".." */
+            fit_text(s, SCREEN_W - 24, ln[nl], sizeof ln[0]);
+        else {
+            rb->memcpy(ln[nl], s, fit);
+            ln[nl][fit] = '\0';
+        }
+        nl++;
+        s += fit;
+        while (*s == ' ') s++;
+    }
+    int lh = 17, y = SCREEN_H - 6 - nl * lh;
+    rb->lcd_set_drawmode(DRMODE_SOLID);
+    rb->lcd_set_foreground(blend565(grad_at(th, y - 5),
+                                    LCD_RGBPACK(255,255,255), 30));
+    rb->lcd_hline(18, SCREEN_W - 19, y - 5);
+    for (int i = 0; i < nl; i++)
+        center_text(y + i * lh, ln[i], th->num1);
+}
+
+/* title + list with sel highlighted; *top scrolls to keep sel in view */
+static void set_draw(const struct theme *th, const char *title,
+                     const struct set_item *it, int n, int sel, int *top)
+{
+    bool footer = false;
+    for (int i = 0; i < n; i++)
+        if (it[i].help) footer = true;
+    int vis = footer ? 6 : 9;   /* rows on screen at once (help: 3 lines) */
+    if (sel < *top) *top = sel;
+    if (sel >= *top + vis) *top = sel - vis + 1;
+
+    fill_gradient(th);
+    kicker(12, title, th->accent);
+    accent_underline(th, 32);
+    int y = SET_TOP;
+    for (int i = *top; i < n && i < *top + vis; i++) {
+        if (it[i].gap && i != *top)
+            y += 4;
+        if (i == sel) {
+            int cy = y + SET_ROW_H / 2 - 1;
+            unsigned hl = it[i].danger
+                ? blend565(grad_at(th, cy), COL_DANGER, 70)
+                : blend565(grad_at(th, cy), LCD_RGBPACK(255,255,255), 44);
+            draw_capsule(th, 20, cy, SCREEN_W - 20, cy, 9, hl);
+        }
+        int w, h;
+        rb->lcd_setfont(body_font);
+        rb->lcd_set_drawmode(DRMODE_FG);
+        if (it[i].value) {
+            rb->lcd_getstringsize(it[i].value, &w, &h);
+            rb->lcd_set_foreground(it[i].danger && i != sel ? COL_DANGER
+                                   : it[i].dim ? COL_TEXT_DIM : th->accent);
+            rb->lcd_putsxy(SCREEN_W - 18 - w, y + 2, it[i].value);
+        }
+        rb->lcd_set_foreground(it[i].danger && i != sel ? COL_DANGER
+                                                         : COL_TEXT_LIGHT);
+        rb->lcd_putsxy(18, y + 2, it[i].label);
+        y += SET_ROW_H;
+    }
+    if (n > vis) {              /* slim scrollbar on the right edge */
+        int y0 = SET_TOP + 3, y1 = SET_TOP + vis * SET_ROW_H - 5;
+        int t0 = y0 + (y1 - y0) * *top / n;
+        int t1 = y0 + (y1 - y0) * (*top + vis) / n;
+        draw_capsule(th, SCREEN_W - 6, y0, SCREEN_W - 6, y1, 1,
+                     blend565(grad_at(th, (y0 + y1) / 2), LCD_RGBPACK(255,255,255), 40));
+        draw_capsule(th, SCREEN_W - 6, t0, SCREEN_W - 6, t1, 1, th->accent);
+    }
+    if (footer && sel >= 0 && sel < n && it[sel].help)
+        set_help(th, it[sel].help);
+}
+
+enum set_row {
+    SR_OPEN, SR_SAVE, SR_PAGES,
+#ifdef WRAPPED_WITH_ACH
+    SR_ACH, SR_ORDER, SR_WATCH, SR_TEST,
+    SR_DANGER, SR_WIPE, SR_RESET, SR_PURGE,
+#endif
+    SR_PAGE0                    /* + card id: that page's show/hide */
+};
+
+static int set_act(int row);
+
+typedef int (*set_fill_fn)(struct set_item *it, int *row);
+
+/* one settings list. fill() rebuilds the rows on every redraw (values
+ * change as they're toggled); SELECT runs set_act() on the row. Returns
+ * 0 = back, 1 = the deck must close, SYS_USB_CONNECTED. top_exits: one
+ * deliberate click above the first row also goes back (the main page,
+ * onto the outro; a fast spin stops at the top). */
+static int set_menu(const struct theme *th, const char *title,
+                    set_fill_fn fill, bool top_exits, bool slide_in)
+{
+    struct set_item it[SET_MAX];
+    int row[SET_MAX];
+    int sel = 0, top = 0, n = 0;
+    bool dirty = true;
+    for (;;) {
+        if (dirty) {
+            n = fill(it, row);
+            if (sel >= n)
+                sel = n - 1;
+            set_draw(th, title, it, n, sel, &top);
+            if (slide_in) { present_card(+1); slide_in = false; }
+            else rb->lcd_update();
+            dirty = false;
+        }
+        int btn = rb->button_get(true);
+        if (btn == SYS_USB_CONNECTED)
+            return SYS_USB_CONNECTED;
+        int base = btn & ~BUTTON_REPEAT;
+        if (base == BUTTON_SCROLL_FWD) {
+            if (sel < n - 1) { sel++; dirty = true; }
+        } else if (base == BUTTON_SCROLL_BACK) {
+            if (sel > 0) { sel--; dirty = true; }
+            else if (top_exits && !(btn & BUTTON_REPEAT))
+                return 0;
+        } else if (btn == BUTTON_MENU || btn == BUTTON_LEFT) {
+            return 0;
+        } else if (btn == BUTTON_SELECT) {
+            int r = set_act(row[sel]);
+            if (r)
+                return r;
+            dirty = true;
+        }
+    }
+}
+
+#define SET_ADD(r, l, v, h) do { row[n] = (r); it[n].label = (l); \
+        it[n].value = (v); it[n].help = (h); \
+        it[n].dim = it[n].gap = it[n].danger = false; n++; } while (0)
+
+static int fill_main(struct set_item *it, int *row)
+{
+    static const char * const open_v[OPEN_N] = {
+        "Ask", "Latest year", "All time" };
+    static char latest_h[48];
+    int ly = log_latest_year;
+    if (!ly && !filter_year && ts_max) {   /* all-time crunch: its end */
+        int m, d;
+        civil_from_days(ts_max / 86400, &ly, &m, &d);
+    }
+    if (ly)
+        rb->snprintf(latest_h, sizeof latest_h,
+                     "Opens the latest year in the log (%d)", ly);
+    else
+        rb->strlcpy(latest_h, "Opens the latest year in the log",
+                    sizeof latest_h);
+    const char *open_h[OPEN_N] = {
+        "Choose a year every time you open",
+        latest_h,
+        "Opens your all-time log" };
+    int n = 0;
+    SET_ADD(SR_OPEN, "Show stats for", open_v[spun_cfg.deck_open],
+            open_h[spun_cfg.deck_open]);
+    if (!log_empty)
+        SET_ADD(SR_SAVE, "Save all pages", NULL,
+                "Saves screenshots of all pages in /wrapped_cards");
+    SET_ADD(SR_PAGES, "Pages", ">", "Hide pages you dislike here");
+#ifdef WRAPPED_WITH_ACH
+    SET_ADD(SR_ACH, "Achievements", ">", "Achievements/achwatch settings");
+    SET_ADD(SR_DANGER, "Danger zone", ">", "Reset achievements or all your history");
+    it[n - 1].gap = it[n - 1].danger = true;
+#endif
+    return n;
+}
+
+static int fill_pages(struct set_item *it, int *row)
+{
+    int n = 0;
+    for (int i = 0; i < N_CARDS; i++) {
+        if (!card_hideable(i))
+            continue;
+        bool hid = card_hidden(i);
+        SET_ADD(SR_PAGE0 + i, card_title(i), hid ? "Hidden" : "Shown", NULL);
+        it[n - 1].dim = hid;
+    }
+    return n;
+}
+
+#ifdef WRAPPED_WITH_ACH
+static bool set_watch_live;     /* the watcher was running when Spun opened */
+
+static int fill_ach(struct set_item *it, int *row)
+{
+    int n = 0;
+    bool bd = spun_cfg.badge_bydate;
+    SET_ADD(SR_ORDER, "Achievements order", bd ? "Unlock date" : "Ladder",
+            bd ? "Newest unlocks first" : "Grouped by type");
+    bool off = rb->file_exists(ACHWATCH_OFF_FLAG);
+    SET_ADD(SR_WATCH, "Achievement watcher",
+            off ? "Off" : set_watch_live ? "On" : "On at restart",
+            "Shows a popup when you unlock an achievement");
+    it[n - 1].dim = off;
+    if (!off && set_watch_live)
+        SET_ADD(SR_TEST, "Send test toast", NULL,
+                "Test popup functionality. (appears 5s after closing Spun)");
+    return n;
+}
+
+static int fill_danger(struct set_item *it, int *row)
+{
+    int n = 0;
+    SET_ADD(SR_WIPE, "Delete achievement progress", NULL,
+            "Resets achievements (saves a backup)");
+    SET_ADD(SR_RESET, "Start over completely", NULL,
+            "Deletes achievement progress and log (saves backups)");
+    SET_ADD(SR_PURGE, "Delete Spun backups", NULL,
+            "Delete saved backups. Irreversible, not recommended. "
+            "(will ask for confirmation)");
+    return n;
+}
+
+static void watch_test_request(void)
+{
+    int fd = rb->open(ACHWATCH_TEST_REQ, O_WRONLY | O_CREAT, 0666);
+    if (fd < 0)
+        return;
+    off_t at = rb->lseek(fd, 0, SEEK_END);
+    if (at >= 0 && at < ACHWATCH_TEST_MAX * 4) {
+        int32_t now = (int32_t)*rb->current_tick;
+        rb->write(fd, &now, 4);
+    }
+    rb->close(fd);
+    rb->splash(HZ, "Toast 5 s after you leave Spun");
+}
+
+static void purge_backups_ask(void)
+{
+    static const char *lines[] = {
+        "Delete the .bak backups?",
+        "This one is for real.",
+        "There is no way back.",
+    };
+    const struct text_message msg = { lines, 3 };
+    if (!spun_yes(&msg))
+        return;
+    int n = spun_purge_backups();
+    if (n > 0)
+        rb->splashf(HZ * 2, "%d backup file%s deleted", n, n == 1 ? "" : "s");
+    else
+        rb->splash(HZ * 2, "No backups to delete");
+}
+#endif
+#undef SET_ADD
+
+/* returns 0 = stay, 1 = the deck must close, SYS_USB_CONNECTED */
+static int set_act(int row)
+{
+    int r = 0;
+    switch (row) {
+    case SR_OPEN:
+        spun_cfg.deck_open = (spun_cfg.deck_open + 1) % OPEN_N;
+        spun_cfg_save();
+        break;
+    case SR_SAVE:
+        export_deck();
+        break;
+    case SR_PAGES:
+        r = set_menu(&set_theme, "PAGES", fill_pages, false, false);
+        break;
+#ifdef WRAPPED_WITH_ACH
+    case SR_ACH:
+        r = set_menu(&set_theme, "ACHIEVEMENTS", fill_ach, false, false);
+        break;
+    case SR_ORDER:
+        spun_cfg.badge_bydate ^= 1;
+        spun_cfg_save();
+        break;
+    case SR_WATCH:
+        if (rb->file_exists(ACHWATCH_OFF_FLAG)) {
+            rb->remove(ACHWATCH_OFF_FLAG);
+        } else {
+            int fd = rb->open(ACHWATCH_OFF_FLAG, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            if (fd >= 0) { rb->write(fd, "1", 1); rb->close(fd); }
+            rb->remove(ACHWATCH_TEST_REQ);
+        }
+        break;
+    case SR_TEST:
+        watch_test_request();
+        break;
+    case SR_DANGER:
+        r = set_menu(&danger_theme, "DANGER ZONE", fill_danger, false, false);
+        break;
+    case SR_WIPE:
+        ach_set_wipe();
+        break;
+    case SR_RESET:
+        if (ach_set_start_over())
+            r = 1;
+        break;
+    case SR_PURGE:
+        purge_backups_ask();
+        break;
+#endif
+    default:
+        if (row >= SR_PAGE0 && row < SR_PAGE0 + N_CARDS) {
+            hide_mask ^= (uint32_t)1 << (row - SR_PAGE0);
+            hide_save();
+        }
+        break;
+    }
+    if (r)
+        return r;
+    rb->button_clear_queue();
+    return 0;
+}
+
+/* returns 0 = back onto the outro, 1 = close the deck, SYS_USB_CONNECTED */
+static int settings_page(void)
+{
+    return set_menu(&set_theme, "SETTINGS", fill_main, true, true);
+}
+
 /* returns PLUGIN_OK normally, PLUGIN_USB_CONNECTED if unplugged mid-view */
 static int wrapped_show(void)
 {
     wrapped_font_init();
-    if (!wrapped_load_data(true))
-        return PLUGIN_OK;
+    log_empty = false;
+    bool have = wrapped_load_data(true);
+    if (!have && !log_empty)
+        return PLUGIN_OK;               /* out of memory: nothing to show */
     hide_load();
+#ifdef WRAPPED_WITH_ACH
+    set_watch_live = !rb->file_exists(ACHWATCH_OFF_FLAG);
+#endif
+    if (!have) {
+        /* nothing logged yet (a new install, or right after Start over):
+         * Settings still opens, so the watcher and the backups stay in
+         * reach. MENU there leaves Spun. */
+        int r = settings_page();
+        rb->lcd_setfont(FONT_SYSFIXED);
+        return r == SYS_USB_CONNECTED ? PLUGIN_USB_CONNECTED : PLUGIN_OK;
+    }
 
     /* card loop */
     int card = 0;
@@ -3185,34 +3664,10 @@ static int wrapped_show(void)
         /* continuous wheel rotation posts repeat-flagged events */
         int base = btn & ~BUTTON_REPEAT;
 
-        /* hold SELECT: hide the current card - or, on the intro, bring
-         * every hidden card back. Checked before anything else so the
-         * repeat flag isn't mistaken for wheel motion. */
+        /* a held SELECT does nothing: pages are hidden in Settings > Pages
+         * (the old hold-to-hide fired from a thumb resting on the button).
+         * Caught first so the repeats can't reach the SELECT handlers. */
         if (base == BUTTON_SELECT && (btn & BUTTON_REPEAT)) {
-            if (card == CARD_INTRO && hide_mask) {
-                hide_mask = 0;
-                hide_save();
-                rb->splash(HZ, "All cards are back");
-                rb->button_clear_queue();
-                btn = draw_card(card, 0);
-                continue;
-            }
-            if (card_hideable(card)) {
-                static const char *hl[] = { "Hide this card from the deck?" };
-                const struct text_message hm = { hl, 1 };
-                if (rb->gui_syncyesno_run(&hm, NULL, NULL) == YESNO_YES) {
-                    hide_mask |= (uint32_t)1 << card;
-                    hide_save();
-                    rb->splash(HZ * 3/2,
-                               "Hidden - hold SELECT on the intro to undo");
-                    int nx = card + 1;
-                    while (nx < N_CARDS && card_hidden(nx)) nx++;
-                    card = (nx < N_CARDS) ? nx : CARD_OUTRO;
-                }
-                rb->button_clear_queue();
-                btn = draw_card(card, 0);
-                continue;
-            }
             btn = 0;
             continue;
         }
@@ -3221,6 +3676,19 @@ static int wrapped_show(void)
             int nx = card + 1;
             while (nx < N_CARDS && card_hidden(nx)) nx++;
             if (nx < N_CARDS) { card = nx; btn = draw_card(card, +1); continue; }
+            /* one deliberate step past the outro (a fast spin stops there) */
+            if (!(btn & BUTTON_REPEAT)) {
+                int r = settings_page();
+                if (r == SYS_USB_CONNECTED) {
+                    rb->lcd_setfont(FONT_SYSFIXED);
+                    return PLUGIN_USB_CONNECTED;
+                }
+                if (r)                 /* "start over" ran: this deck     */
+                    break;             /* describes data that's gone      */
+                rb->button_clear_queue();
+                btn = draw_card(card, -1);
+                continue;
+            }
 #ifdef WRAPPED_WITH_ACH
         } else if (base == BUTTON_SELECT && card == CARD_ACH) {
             /* the achievements card is interactive: SELECT browses badges */
@@ -3249,11 +3717,6 @@ static int wrapped_show(void)
             if (nx >= 0) { card = nx; btn = draw_card(card, -1); continue; }
         } else if (base == BUTTON_PLAY) {
             save_card();
-            btn = draw_card(card, 0);
-            continue;
-        } else if (base == BUTTON_SELECT && card == CARD_OUTRO) {
-            /* the outro's parting trick: dump the finished deck */
-            export_deck();
             btn = draw_card(card, 0);
             continue;
         } else if (base == BUTTON_MENU) {
